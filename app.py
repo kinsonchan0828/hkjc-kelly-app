@@ -125,18 +125,21 @@ def evaluate_bets(track_code, horses_data, bankroll):
         recommended_bets = win_bets + quinella_bets
         strategy_reason = f"Track Profile [{track_code}] uses STANDARD mode. Showing all +EV Win and Quinella opportunities."
 
-    # 4. Enforce 5% Single-Race Bankroll Cap (HK$250 on HK$5000)
+    # 4. Enforce 5% Single-Race Bankroll Cap & Round Stakes to Nearest HK$10
     max_cap = bankroll * 0.05
     total_raw_stake = sum(b['stake'] for b in recommended_bets)
 
     if total_raw_stake > max_cap and total_raw_stake > 0:
         scale_factor = max_cap / total_raw_stake
         for b in recommended_bets:
-            b['stake'] = round(b['stake'] * scale_factor, 0)
+            b['stake'] = int(round((b['stake'] * scale_factor) / 10.0) * 10)
         strategy_reason += f" Stakes scaled down proportionally to fit HK${max_cap:.0f} cap."
     else:
         for b in recommended_bets:
-            b['stake'] = round(b['stake'], 0)
+            b['stake'] = int(round(b['stake'] / 10.0) * 10)
+
+    # Filter out bets that round down below the HK$10 minimum unit
+    recommended_bets = [b for b in recommended_bets if b['stake'] >= 10]
 
     return recommended_bets, strategy_reason, strategy_mode
 
