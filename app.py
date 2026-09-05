@@ -143,6 +143,51 @@ def evaluate_bets(track_code, horses_data, bankroll):
 
     return recommended_bets, strategy_reason, strategy_mode
 
+# --- MULTI-RACE GOOGLE SHEET PARSER ---
+
+def parse_multi_race_sheet(df_raw):
+    """Parses a Google Sheet containing up to 10 races stacked vertically."""
+    races = []
+    current_race = None
+
+    for _, row in df_raw.iterrows():
+        col0 = str(row[0]).strip() if pd.notna(row[0]) else ""
+        col1 = str(row[1]).strip() if pd.notna(row[1]) else ""
+        col2 = str(row[2]).strip() if pd.notna(row[2]) else ""
+
+        if not col0:
+            continue
+
+        # Try parsing col0 as a horse number (e.g., 1, 2, 3...)
+        try:
+            horse_no = int(float(col0))
+            if current_race is not None and col1:
+                def clean_probability(val):
+                    s = str(val).replace('%', '').strip()
+                    try:
+                        num = float(s)
+                        return num / 100.0 if num > 1.0 else num
+                    except ValueError:
+                        return 0.0
+
+                current_race['horses'].append({
+                    'no': horse_no,
+                    'name': col1,
+                    'win_prob': clean_probability(col2)
+                })
+        except ValueError:
+            # col0 is non-numeric (e.g., "R1", "R2", "Race 10")
+            if col1 and not col0.lower().startswith("horse"):
+                current_race = {
+                    'title': col0,
+                    'track': col1,
+                    'horses': []
+                }
+                races.append(current_race)
+
+    # Return only valid races that contain horses
+    return [r for r in races if len(r['horses']) > 0]
+
 # --- STREAMLIT USER INTERFACE ---
 
 st.set_page_config(page_title="HKJC Kelly Execution Terminal", layout="centered")
@@ -161,69 +206,73 @@ sheet_url = st.text_input(
     placeholder="Paste published CSV link here..."
 )
 
-def parse_sheet_data(df_raw):
-    race_title = str(df_raw.iloc[0, 0]).strip()
-    track_code = str(df_raw.iloc[0, 1]).strip()
-    
-    data = df_raw.iloc[1:].copy()
-    data.columns = ['Horse_No', 'Horse_Name', 'Win_Prob']
-    
-    data['Horse_No'] = pd.to_numeric(data['Horse_No'], errors='coerce')
-    data = data.dropna(subset=['Horse_No'])
-    data['Horse_No'] = data['Horse_No'].astype(int)
-    
-    def clean_probability(val):
-        s = str(val).replace('%', '').strip()
-        num = float(s)
-        return num / 100.0 if num > 1.0 else num
+# Mock fallback multi-race data for testing if no URL provided
+mock_df = pd.DataFrame([
+    ["R1", "SH A 1000", "Final Win %"],
+    [1, "浪漫勇士", 0.28],
+    [2, "金槍六十", 0.24],
+    [3, "加州星球", 0.18],
+    [4, "遨遊氣泡", 0.14],
+    ["R2", "HV A 1200", "Final Win %"],
+    [1, "超悅明駒", 0.30],
+    [2, "快如疾風", 0.25],
+    [3, "幸運有您", 0.20],
+])
 
-    data['Win_Prob'] = data['Win_Prob'].apply(clean_probability)
-    return race_title, track_code, data
-
-# Fallback default data matching user layout if no URL provided
 if not sheet_url:
-    mock_df = pd.DataFrame([
-        ["Race 1", "SH A 1000", "Final Win %"],
-        [1, "浪漫勇士", 0.28],
-        [2, "金槍六十", 0.24],
-        [3, "加州星球", 0.18],
-        [4, "遨遊氣泡", 0.14],
-    ])
-    race_title, track_code, horse_df = parse_sheet_data(mock_df)
+    races = parse_multi_race_sheet(mock_df)
 else:
     try:
         raw_df = pd.read_csv(sheet_url, header=None)
-        race_title, track_code, horse_df = parse_sheet_data(raw_df)
+        races = parse_multi_race_sheet(raw_df)
     except Exception as e:
         st.error(f"Error loading Google Sheet CSV: {e}")
         st.stop()
 
+if not races:
+    st.error("No valid race data could be parsed from the provided Google Sheet.")
+    st.stop()
+
+# Race Selector Dropdown
+race_options = [f"{r['title']} ({r['track']})" for r in races]
+selected_race_idx = st.selectbox(
+    "Select Race to Bet On",
+    range(len(race_options)),
+    format_func=lambda x: race_options[x]
+)
+
+# Active Race Data
+selected_race = races[selected_race_idx]
+race_title = selected_race['title']
+track_code = selected_race['track']
+horse_list = selected_race['horses']
+
 # Track Rule Lookup Display
 rule_type = TRACK_STRATEGY_MAP.get(track_code, "Standard")
-st.info(f"**Loaded:** {race_title} | **Track:** {track_code} | **Strategy Rule:** {rule_type}")
+st.info(f"**Selected:** {race_title} | **Track:** {track_code} | **Strategy Rule:** {rule_type}")
 
 # Live Odds Input Area
 st.subheader("2. Input Real-Time Tote Odds (T-3 min)")
 
 horses_input = []
-cols = st.columns(min(len(horse_df), 4))
+cols = st.columns(min(len(horse_list), 4))
 
-for idx, (_, row) in enumerate(horse_df.iterrows()):
+for idx, h in enumerate(horse_list):
     col_idx = idx % 4
     with cols[col_idx]:
-        st.caption(f"#{row['Horse_No']} {row['Horse_Name']}")
-        st.text(f"Win%: {row['Win_Prob']*100:.1f}%")
+        st.caption(f"#{h['no']} {h['name']}")
+        st.text(f"Win%: {h['win_prob']*100:.1f}%")
         live_odds = st.number_input(
-            f"Odds #{row['Horse_No']}",
+            f"Odds #{h['no']}",
             min_value=1.0,
             value=float(4.0 + idx),
             step=0.1,
-            key=f"odds_{row['Horse_No']}"
+            key=f"odds_{race_title}_{h['no']}"
         )
         horses_input.append({
-            'no': row['Horse_No'],
-            'name': row['Horse_Name'],
-            'win_prob': row['Win_Prob'],
+            'no': h['no'],
+            'name': h['name'],
+            'win_prob': h['win_prob'],
             'live_odds': live_odds
         })
 
@@ -238,7 +287,7 @@ if rule_type in ["Quin", "Standard"]:
                     f"Q Odds #{h1['no']} & #{h2['no']}",
                     value=default_q,
                     step=0.5,
-                    key=f"q_odds_{h1['no']}_{h2['no']}"
+                    key=f"q_odds_{race_title}_{h1['no']}_{h2['no']}"
                 )
 
 # Calculate Decision
