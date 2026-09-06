@@ -95,18 +95,28 @@ def parse_multi_race_sheet(df_raw):
     return [r for r in races if len(r['horses']) > 0]
 
 # ==========================================
-# 3. LIVE HKJC ODDS FETCHER
+# 3. LIVE HKJC ODDS FETCHER (SESSION ENABLED)
 # ==========================================
 def fetch_hkjc_live_odds(race_no_str):
-    """Fetches real-time HKJC Win tote odds via HKJC API."""
+    """Fetches real-time HKJC Win tote odds using session cookies and browser headers."""
     race_digit = ''.join(filter(str.isdigit, str(race_no_str))) or "1"
-    url = f"https://bet.hkjc.com/racing/script/json/win_odds.aspx?lang=en&date=latest&raceno={race_digit}"
+    
+    session = requests.Session()
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://bet.hkjc.com/"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Referer": "https://bet.hkjc.com/racing/pages/odds_wp.aspx?lang=en",
+        "X-Requested-With": "XMLHttpRequest"
     }
+    
     try:
-        res = requests.get(url, headers=headers, timeout=6)
+        # Establish session cookies with HKJC
+        session.get("https://bet.hkjc.com/racing/pages/odds_wp.aspx?lang=en", headers=headers, timeout=5)
+        
+        # Fetch live odds JSON
+        url = f"https://bet.hkjc.com/racing/script/json/win_odds.aspx?lang=en&date=latest&raceno={race_digit}"
+        res = session.get(url, headers=headers, timeout=5)
+        
         if res.status_code == 200:
             data = res.json()
             odds_dict = {}
@@ -116,7 +126,7 @@ def fetch_hkjc_live_odds(race_no_str):
                     h_win = float(item.get("win", 0.0))
                     if h_num > 0 and h_win > 0:
                         odds_dict[h_num] = h_win
-            return odds_dict
+                return odds_dict
     except Exception:
         pass
     return {}
