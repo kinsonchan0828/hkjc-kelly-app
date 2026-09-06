@@ -1,3 +1,17 @@
+import os
+import subprocess
+import streamlit as st
+
+@st.cache_resource
+def install_playwright_browser():
+    """Runs once per deployment to download Chromium."""
+    try:
+        subprocess.run(["playwright", "install", "chromium"], check=True)
+    except Exception as e:
+        st.error(f"Playwright browser installation failed: {e}")
+
+# Trigger the browser installation
+install_playwright_browser()
 import json
 import requests
 from typing import Dict, Any, Optional, List
