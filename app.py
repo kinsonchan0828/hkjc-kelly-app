@@ -27,11 +27,9 @@ def parse_custom_sheet(df_raw):
         col_b = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ""
         col_c = str(row.iloc[2]).strip() if pd.notna(row.iloc[2]) else ""
 
-        # Skip completely empty rows
         if not col_a and not col_b and not col_c:
             continue
 
-        # Check if Col A is a Race Header (e.g., 'R1', 'R2', 'R10', 'Race 1')
         if col_a.upper().startswith('R') and not col_a.isdigit():
             race_info = f"{col_a}"
             if col_b and col_b.lower() != 'nan':
@@ -39,24 +37,21 @@ def parse_custom_sheet(df_raw):
             current_race = race_info
             continue
 
-        # Try parsing Col A as a Horse Number (1 to 14)
         try:
             horse_no = int(float(col_a))
             if 1 <= horse_no <= 14:
                 horse_name = col_b if col_b and col_b.lower() != 'nan' else f"Horse {horse_no}"
                 
-                # Parse Win % (handles both 0.15 and 15 or 15%)
                 try:
                     clean_c = col_c.replace('%', '').strip()
                     win_val = float(clean_c)
                     
-                    # Convert decimal (e.g., 0.15) to percentage (15.0)
                     if 0 < win_val <= 1.0:
                         win_pct = round(win_val * 100.0, 2)
                     else:
                         win_pct = round(win_val, 2)
                 except ValueError:
-                    continue  # Header row or text in win % column
+                    continue
 
                 race_data.append({
                     'Race': current_race,
@@ -65,7 +60,6 @@ def parse_custom_sheet(df_raw):
                     'Model Win %': win_pct
                 })
         except ValueError:
-            # Row is not a race header and not a horse number (e.g. table titles)
             continue
 
     if not race_data:
@@ -79,7 +73,7 @@ def parse_custom_sheet(df_raw):
 st.sidebar.header("💰 Bankroll & Risk Control")
 
 if 'bankroll' not in st.session_state:
-    st.session_state.bankroll = 10000.0
+    st.session_state.bankroll = 5000.0
 
 bankroll = st.sidebar.number_input(
     "Current Total Bankroll ($)",
@@ -90,11 +84,11 @@ bankroll = st.sidebar.number_input(
 )
 st.session_state.bankroll = bankroll
 
-# Strict 5% bankroll cap
-max_race_stake = bankroll * 0.05
+# Hard 5% bankroll cap ceiling
+max_race_stake = float(bankroll * 0.05)
 
 st.sidebar.metric(
-    label="Max Race Stake (5% Cap)",
+    label="Max Allowed Stake (5% Cap)",
     value=f"${max_race_stake:.2f}"
 )
 
@@ -102,7 +96,7 @@ st.sidebar.markdown("""
 ---
 **Active Risk Rules:**
 * 🎯 **Win-Only Mode:** Exotic pools disabled.
-* 🛡️ **Hard Cap:** Total stake capped at 5% of bankroll.
+* 🛡️ **Hard Cap Limit:** Maximum 5% bankroll per race.
 * 🛑 **Price Floor:** Auto-reject bets below Minimum Odds (+5% EV).
 * 💵 **HKJC Rule:** Stakes rounded to nearest HK$10.
 """)
@@ -146,11 +140,8 @@ with tab_sheet:
         if err:
             st.error(err)
         else:
-            # Race Selection if multiple races exist
             races_available = parsed_df['Race'].unique()
             selected_race = st.selectbox("🎯 Select Race to Analyze:", races_available)
-            
-            # Filter data for selected race
             data_df = parsed_df[parsed_df['Race'] == selected_race][['Horse No', 'Horse Name', 'Model Win %']].reset_index(drop=True)
 
 with tab_manual:
@@ -163,12 +154,9 @@ with tab_manual:
         data_df = st.data_editor(default_data, num_rows="dynamic", key="manual_editor")
 
 if data_df is not None and not data_df.empty:
-    # Calculate Fair Odds and Minimum Acceptable Odds (+5% EV)
     df_calc = data_df.copy()
     df_calc['Win Prob (Dec)'] = df_calc['Model Win %'] / 100.0
     df_calc['Fair Odds'] = df_calc['Win Prob (Dec)'].apply(lambda p: round(1.0 / p, 2) if p > 0 else 999.0)
-    
-    # Minimum Odds for +5% EV: Required Odds = 1.05 / Win_Probability
     df_calc['Min Odds (+5% EV)'] = df_calc['Win Prob (Dec)'].apply(lambda p: round(1.05 / p, 2) if p > 0 else 999.0)
 
     st.subheader("Price Floor & Trainer Audit Table")
@@ -185,7 +173,6 @@ if data_df is not None and not data_df.empty:
     )
 
     contenders = edited_df[edited_df['Keep'] == True].copy()
-    
     st.info(f"Active Contenders Remaining: **{len(contenders)} / {len(edited_df)}**")
 
 # ==============================================================================
@@ -216,13 +203,14 @@ if data_df is not None and not data_df.empty:
                     key=horse_key
                 )
             
+            # Allows user manual entry up to 5% bankroll limit
             custom_stake = st.number_input(
-                "Target Race Stake ($)",
+                f"Target Total Race Stake ($) — Max Allowed: ${max_race_stake:.2f}",
                 min_value=10.0,
-                max_value=float(max_race_stake),
-                value=float(max_race_stake),
-                step=50.0,
-                help="Defaults to 5% bankroll cap. Individual bets will be rounded to nearest HK$10."
+                max_value=max_race_stake,
+                value=max_race_stake,
+                step=10.0,
+                help=f"Defaults to 5% bankroll cap (${max_race_stake:.2f}). You can reduce this amount (e.g. $200), but cannot exceed the maximum cap."
             )
 
             calculate_btn = st.form_submit_button("Calculate Dutching Execution")
@@ -252,11 +240,10 @@ if data_df is not None and not data_df.empty:
 
             dutch_df = pd.DataFrame(dutch_data)
 
-            # Continuous ratio
             dutch_df['Bet Ratio (%)'] = (dutch_df['Inv Odds'] / inv_odds_sum) * 100.0
             raw_stake = (dutch_df['Bet Ratio (%)'] / 100.0) * custom_stake
 
-            # Round to nearest HK$10 (HKJC minimum unit increment, min $10 if ratio > 0)
+            # Round stakes to nearest HK$10
             dutch_df['Suggested Stake ($)'] = raw_stake.apply(lambda s: max(10, int(round(s / 10.0) * 10)) if s >= 5 else 0)
 
             actual_total_stake = int(dutch_df['Suggested Stake ($)'].sum())
