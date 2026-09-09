@@ -37,6 +37,7 @@ st.sidebar.markdown("""
 * 🎯 **Win-Only Mode:** Exotic pools disabled.
 * 🛡️ **Hard Cap:** Total stake capped at 5% of bankroll.
 * 🛑 **Price Floor:** Auto-reject bets below Minimum Odds (+5% EV).
+* 💵 **HKJC Unit Rule:** All stakes rounded to nearest $10.
 """)
 
 # ==============================================================================
@@ -141,12 +142,12 @@ if data_df is not None and not data_df.empty:
                     )
                 
                 custom_stake = st.number_input(
-                    "Total Race Stake ($)",
+                    "Target Race Stake ($)",
                     min_value=10.0,
                     max_value=float(max_race_stake),
                     value=float(max_race_stake),
                     step=50.0,
-                    help="Defaults to your 5% bankroll cap. You can lower this amount, but cannot exceed 5%."
+                    help="Defaults to your 5% bankroll cap. Stakes for individual horses will be rounded to nearest HK$10."
                 )
 
                 calculate_btn = st.form_submit_button("Calculate Dutching Execution")
@@ -161,7 +162,6 @@ if data_df is not None and not data_df.empty:
                     min_odds = row['Min Odds (+5% EV)']
                     curr_odds = live_odds_input[h_no]
                     
-                    # Inverse odds sum calculation for Dutching
                     inv_odds_sum += (1.0 / curr_odds)
                     
                     is_value = curr_odds >= min_odds
@@ -177,26 +177,34 @@ if data_df is not None and not data_df.empty:
 
                 dutch_df = pd.DataFrame(dutch_data)
 
-                # Dutching Allocation Logic
+                # Ideal continuous bet stake
                 dutch_df['Bet Ratio (%)'] = (dutch_df['Inv Odds'] / inv_odds_sum) * 100.0
-                dutch_df['Suggested Stake ($)'] = (dutch_df['Bet Ratio (%)'] / 100.0) * custom_stake
-                dutch_df['Suggested Stake ($)'] = dutch_df['Suggested Stake ($)'].round(1)
+                raw_stake = (dutch_df['Bet Ratio (%)'] / 100.0) * custom_stake
 
-                # Projected Returns
-                projected_payout = (custom_stake / inv_odds_sum) if inv_odds_sum > 0 else 0
-                projected_profit = projected_payout - custom_stake
-                roi_pct = (projected_profit / custom_stake) * 100.0 if custom_stake > 0 else 0
+                # Round to nearest HK$10 (HKJC minimum unit increment, min $10 if ratio > 0)
+                dutch_df['Suggested Stake ($)'] = raw_stake.apply(lambda s: max(10, int(round(s / 10.0) * 10)) if s >= 5 else 0)
 
-                st.subheader("🎯 Execution Summary")
+                # Calculate actual combined stake after rounding to $10 units
+                actual_total_stake = int(dutch_df['Suggested Stake ($)'].sum())
+                
+                # Projected Payout per winning horse ($ Stake * Live Odds)
+                dutch_df['Est Payout ($)'] = (dutch_df['Suggested Stake ($)'] * dutch_df['Live Odds']).round(1)
+                
+                # Minimum return across selected winning horses
+                min_payout = dutch_df[dutch_df['Suggested Stake ($)'] > 0]['Est Payout ($)'].min() if actual_total_stake > 0 else 0
+                net_profit = min_payout - actual_total_stake
+                roi_pct = (net_profit / actual_total_stake * 100.0) if actual_total_stake > 0 else 0
+
+                st.subheader("🎯 Execution Summary (HK$10 Units)")
                 
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Total Investment", f"${custom_stake:.2f}")
-                m2.metric("Projected Payout", f"${projected_payout:.2f}")
-                m3.metric("Net Profit", f"${projected_profit:.2f}", delta=f"{roi_pct:.1f}% ROI")
-                m4.metric("Dutch Book Overround", f"{(inv_odds_sum * 100.0):.1f}%", delta="Profit Guaranteed" if inv_odds_sum < 1.0 else "High Market Takeout", delta_color="normal" if inv_odds_sum < 1.0 else "inverse")
+                m1.metric("Actual Total Bet", f"${actual_total_stake}")
+                m2.metric("Min Est. Payout", f"${min_payout:.1f}")
+                m3.metric("Est. Net Profit", f"${net_profit:.1f}", delta=f"{roi_pct:.1f}% ROI")
+                m4.metric("Dutch Book Overround", f"{(inv_odds_sum * 100.0):.1f}%")
 
                 st.dataframe(
-                    dutch_df[['Horse No', 'Horse Name', 'Live Odds', 'Min Odds (+5% EV)', 'Value Check', 'Bet Ratio (%)', 'Suggested Stake ($)']],
+                    dutch_df[['Horse No', 'Horse Name', 'Live Odds', 'Min Odds (+5% EV)', 'Value Check', 'Bet Ratio (%)', 'Suggested Stake ($)', 'Est Payout ($)']],
                     hide_index=True,
                     use_container_width=True
                 )
