@@ -178,7 +178,6 @@ if data_df is not None and not data_df.empty:
                 dutch_df = pd.DataFrame(dutch_data)
 
                 # Dutching Allocation Logic
-                # Stake_i = Total_Stake * ( (1/Odds_i) / Sum(1/Odds_k) )
                 dutch_df['Bet Ratio (%)'] = (dutch_df['Inv Odds'] / inv_odds_sum) * 100.0
                 dutch_df['Suggested Stake ($)'] = (dutch_df['Bet Ratio (%)'] / 100.0) * custom_stake
                 dutch_df['Suggested Stake ($)'] = dutch_df['Suggested Stake ($)'].round(1)
@@ -204,8 +203,3 @@ if data_df is not None and not data_df.empty:
 
                 if any(dutch_df['Live Odds'] < dutch_df['Min Odds (+5% EV)']):
                     st.warning("⚠️ One or more selected horses are currently below your Minimum Acceptable Odds (+5% EV). Consider unchecking overvalued runners in the audit table.")
-
-<ElicitationsGroup message="Next steps for your betting workflow:">
-  <Elicitation label="Add real-time odds tracking via HKJC API or Web Interceptor" query="Add the live odds API fetcher module into this updated Win-only Dutching app." />
-  <Elicitation label="Include dynamic bankroll logging and historical trade recording" query="Add a feature to log bets placed and dynamically update bankroll after race results." />
-</ElicitationsGroup>
