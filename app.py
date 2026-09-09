@@ -1,341 +1,211 @@
 import streamlit as st
 import pandas as pd
 
-# --- FULL HKJC TRACK STRATEGY MATRIX ---
+# ==============================================================================
+# Page Configuration
+# ==============================================================================
+st.set_page_config(page_title="HKJC Win-Only Quantitative Betting Engine", layout="wide")
 
-TRACK_STRATEGY_MAP = {
-    # Sha Tin A Course
-    "SH A 1000": "Quin", "SH A 1200": "Quin", "SH A 1400": "Quin", "SH A 2000": "Quin",
-    "SH A 1600": "Standard",
-    "SH A 1800": "Win only",
+# ==============================================================================
+# Sidebar: Bankroll & Risk Management
+# ==============================================================================
+st.sidebar.header("💰 Bankroll & Risk Control")
+
+if 'bankroll' not in st.session_state:
+    st.session_state.bankroll = 10000.0
+
+bankroll = st.sidebar.number_input(
+    "Current Total Bankroll ($)",
+    min_value=100.0,
+    value=float(st.session_state.bankroll),
+    step=500.0,
+    key="bankroll_input"
+)
+st.session_state.bankroll = bankroll
+
+# Calculate strict 5% bankroll cap
+max_race_stake = bankroll * 0.05
+
+st.sidebar.metric(
+    label="Max Race Stake (5% Cap)",
+    value=f"${max_race_stake:.2f}"
+)
+
+st.sidebar.markdown("""
+---
+**Risk Rules Enabled:**
+* 🎯 **Win-Only Mode:** Exotic pools disabled.
+* 🛡️ **Hard Cap:** Total stake capped at 5% of bankroll.
+* 🛑 **Price Floor:** Auto-reject bets below Minimum Odds (+5% EV).
+""")
+
+# ==============================================================================
+# Main App Header
+# ==============================================================================
+st.title("🏇 HKJC Win-Only Decision Support Engine")
+st.caption("Hybrid System: Math Model Price Floor + Human Trainer Audit + Constrained Dutching")
+
+# ==============================================================================
+# PART 1 & 2: Data Input, Minimum Acceptable Odds, & Trainer Pruning
+# ==============================================================================
+st.header("1. Model Input & Trainer Audit")
+
+tab_sheet, tab_manual = st.tabs(["📊 Import from Google Sheet / CSV", "✏️ Manual Input"])
+
+data_df = None
+
+with tab_sheet:
+    sheet_url = st.text_input("Google Sheet Public CSV URL or File Upload", placeholder="https://docs.google.com/spreadsheets/d/.../export?format=csv")
+    uploaded_file = st.file_uploader("Or upload CSV file", type=["csv"])
     
-    # Sha Tin A+3 Course
-    "SH A+3 1000": "Quin", "SH A+3 1200": "Quin", "SH A+3 1400": "Quin", "SH A+3 1600": "Quin",
-    "SH A+3 1800": "Win only", "SH A+3 2000": "Win only",
-    
-    # Sha Tin B Course
-    "SH B 1000": "Standard", "SH B 1600": "Standard",
-    "SH B 1200": "Quin",
-    "SH B 1400": "Win only", "SH B 1800": "Win only", "SH B 2000": "Win only",
-    
-    # Sha Tin B+2 Course
-    "SH B+2 1000": "Win only", "SH B+2 1600": "Win only", "SH B+2 1800": "Win only",
-    "SH B+2 1200": "Quin", "SH B+2 1400": "Quin", "SH B+2 2000": "Quin",
-    
-    # Sha Tin C Course
-    "SH C 1000": "Win only", "SH C 1200": "Win only", "SH C 1800": "Win only",
-    "SH C 1400": "Standard",
-    "SH C 1600": "Quin",
-    
-    # Sha Tin C+3 Course
-    "SH C+3 1000": "Standard", "SH C+3 1400": "Standard", "SH C+3 1600": "Standard",
-    "SH C+3 1200": "Quin",
-    "SH C+3 1800": "Win only",
-    
-    # Happy Valley A Course
-    "HV A 1000": "Quin",
-    "HV A 1200": "Win only",
-    "HV A 1650": "Standard", "HV A 1800": "Standard", "HV A 2200": "Standard",
-    
-    # Happy Valley B Course
-    "HV B 1000": "Standard",
-    "HV B 1200": "Win only", "HV B 1650": "Win only", "HV B 1800": "Win only",
-    "HV B 2200": "Quin",
-    
-    # Happy Valley C Course
-    "HV C 1000": "Win only", "HV C 1650": "Win only",
-    "HV C 1200": "Standard", "HV C 1800": "Standard",
-    "HV C 2200": "Quin",
-    
-    # Happy Valley C+3 Course
-    "HV C+3 1000": "Win only", "HV C+3 1200": "Win only", "HV C+3 1650": "Win only",
-    "HV C+3 1800": "Win only", "HV C+3 2200": "Win only",
-    
-    # All-Weather Dirt (Mud)
-    "Mud 1200": "Standard", "Mud 1800": "Standard",
-    "Mud 1650": "Win only",
-}
-
-# --- MATHEMATICAL ENGINES ---
-
-def calculate_harville_quinella(p_a, p_b):
-    """Calculates joint top-2 Quinella probability using Harville formula."""
-    p_a_then_b = p_a * (p_b / (1.0 - p_a))
-    p_b_then_a = p_b * (p_a / (1.0 - p_b))
-    return p_a_then_b + p_b_then_a
-
-def calculate_quarter_kelly(p, odds, bankroll, min_ev=0.05, kelly_frac=0.25):
-    """Calculates 1/4 Kelly stake in HKD with minimum +5% EV filter."""
-    ev = (p * odds) - 1.0
-    if ev < min_ev:
-        return 0.0, ev
-    raw_kelly = ev / (odds - 1.0)
-    stake = bankroll * kelly_frac * raw_kelly
-    return stake, ev
-
-# --- STRATEGY DECISION ENGINE ---
-
-def evaluate_bets(race_title, track_code, horses_data, bankroll):
-    strategy_mode = TRACK_STRATEGY_MAP.get(track_code.strip(), "Standard")
-    
-    win_bets = []
-    quinella_bets = []
-
-    # 1. Evaluate Win Bets (+5% EV minimum)
-    for h in horses_data:
-        stake, ev = calculate_quarter_kelly(h['win_prob'], h['live_odds'], bankroll)
-        if stake > 0:
-            win_bets.append({
-                'type': 'WIN',
-                'horse_no': h['no'],
-                'selection': f"#{h['no']} {h['name']}",
-                'stake': stake,
-                'ev': ev,
-                'odds': h['live_odds']
-            })
-
-    # 2. Evaluate Quinella Bets (+5% EV minimum)
-    n = len(horses_data)
-    for i in range(n):
-        for j in range(i + 1, n):
-            h1, h2 = horses_data[i], horses_data[j]
-            p_quin = calculate_harville_quinella(h1['win_prob'], h2['win_prob'])
-            
-            # Fetch custom Q odds or auto-estimate from Win odds
-            q_key = f"q_odds_{race_title}_{h1['no']}_{h2['no']}"
-            q_odds = st.session_state.get(q_key, round(h1['live_odds'] * h2['live_odds'] * 0.40, 1))
-            stake, ev = calculate_quarter_kelly(p_quin, q_odds, bankroll)
-            
-            if stake > 0:
-                quinella_bets.append({
-                    'type': 'QUINELLA',
-                    'horse_nos': (h1['no'], h2['no']),
-                    'selection': f"Q #{h1['no']} & #{h2['no']} ({h1['name']} / {h2['name']})",
-                    'stake': stake,
-                    'ev': ev,
-                    'odds': q_odds
-                })
-
-    # 3. Dynamic Strategy Synthesis Engine
-    recommended_bets = []
-    strategy_reason = ""
-
-    if strategy_mode == "Win only":
-        recommended_bets = win_bets
-        strategy_reason = f"Track Profile [{track_code}] is set to WIN ONLY. Quinellas are disabled."
-
-    elif strategy_mode == "Quin":
-        if quinella_bets:
-            recommended_bets = list(quinella_bets)
-            strategy_reason = f"Track Profile [{track_code}] prioritizes QUINELLA. Active +EV Quinella pair(s) found."
-            
-            # Dynamic Check: Are there uncovered +EV Win horses not in any selected Quinella pair?
-            q_covered_horses = set()
-            for qb in quinella_bets:
-                q_covered_horses.add(qb['horse_nos'][0])
-                q_covered_horses.add(qb['horse_nos'][1])
-            
-            uncovered_win_bets = [wb for wb in win_bets if wb['horse_no'] not in q_covered_horses]
-            if uncovered_win_bets:
-                recommended_bets.extend(uncovered_win_bets)
-                uncovered_names = ", ".join([wb['selection'] for wb in uncovered_win_bets])
-                strategy_reason += f" Added uncovered +EV Win bet(s): {uncovered_names}."
-        
-        elif win_bets:
-            # Fallback: Quinella track, but favorites/pairs are overbet (< +5% EV)
-            recommended_bets = list(win_bets)
-            win_names = ", ".join([wb['selection'] for wb in win_bets])
-            strategy_reason = f"Track Profile [{track_code}] prioritizes QUINELLA, but no Quinella pairs met +5% EV (favorites overbet). Automatically fell back to +EV WIN bet(s): {win_names}."
-        
-        else:
-            recommended_bets = []
-            strategy_reason = f"Track Profile [{track_code}] prioritizes QUINELLA. No Win or Quinella selections met the +5% EV threshold."
-
-    else:  # Standard Mode
-        recommended_bets = win_bets + quinella_bets
-        strategy_reason = f"Track Profile [{track_code}] uses STANDARD mode. Showing all +EV Win and Quinella opportunities."
-
-    # 4. Enforce 5% Single-Race Bankroll Cap & Round Stakes to Nearest HK$10
-    max_cap = bankroll * 0.05
-    total_raw_stake = sum(b['stake'] for b in recommended_bets)
-
-    if total_raw_stake > max_cap and total_raw_stake > 0:
-        scale_factor = max_cap / total_raw_stake
-        for b in recommended_bets:
-            b['stake'] = int(round((b['stake'] * scale_factor) / 10.0) * 10)
-        strategy_reason += f" Stakes scaled down proportionally to fit HK${max_cap:.0f} single-race cap."
-    else:
-        for b in recommended_bets:
-            b['stake'] = int(round(b['stake'] / 10.0) * 10)
-
-    # Filter out bets that round down below the HK$10 minimum unit
-    recommended_bets = [b for b in recommended_bets if b['stake'] >= 10]
-
-    return recommended_bets, strategy_reason, strategy_mode
-
-# --- MULTI-RACE GOOGLE SHEET PARSER ---
-
-def parse_multi_race_sheet(df_raw):
-    """Parses a Google Sheet containing up to 10 races stacked vertically."""
-    races = []
-    current_race = None
-
-    for _, row in df_raw.iterrows():
-        col0 = str(row[0]).strip() if pd.notna(row[0]) else ""
-        col1 = str(row[1]).strip() if pd.notna(row[1]) else ""
-        col2 = str(row[2]).strip() if pd.notna(row[2]) else ""
-
-        if not col0:
-            continue
-
+    if uploaded_file is not None:
         try:
-            horse_no = int(float(col0))
-            if current_race is not None and col1:
-                def clean_probability(val):
-                    s = str(val).replace('%', '').strip()
-                    try:
-                        num = float(s)
-                        return num / 100.0 if num > 1.0 else num
-                    except ValueError:
-                        return 0.0
+            data_df = pd.read_csv(uploaded_file)
+        except Exception as e:
+            st.error(f"Error reading uploaded file: {e}")
+    elif sheet_url.strip():
+        try:
+            data_df = pd.read_csv(sheet_url.strip())
+        except Exception as e:
+            st.error(f"Error loading Google Sheet URL. Ensure the sheet is shared as 'Anyone with link can view': {e}")
 
-                current_race['horses'].append({
-                    'no': horse_no,
-                    'name': col1,
-                    'win_prob': clean_probability(col2)
-                })
-        except ValueError:
-            if col1 and not col0.lower().startswith("horse"):
-                current_race = {
-                    'title': col0,
-                    'track': col1,
-                    'horses': []
-                }
-                races.append(current_race)
-
-    return [r for r in races if len(r['horses']) > 0]
-
-# --- STREAMLIT USER INTERFACE ---
-
-st.set_page_config(page_title="HKJC Kelly Execution Terminal", layout="centered")
-st.title("🏇 HKJC Execution Terminal")
-
-# Sidebar - Bankroll Settings
-bankroll = st.sidebar.number_input("Current Bankroll (HK$)", value=5000, step=500)
-st.sidebar.write(f"Single-Race 5% Cap: **HK${bankroll * 0.05:.0f}**")
-
-# Data Loader / Input Source
-st.subheader("1. Load Pre-Loaded Selections")
-
-sheet_url = st.text_input(
-    "Google Sheet Published CSV URL",
-    value="",
-    placeholder="Paste published CSV link here..."
-)
-
-# Mock fallback multi-race data for testing
-mock_df = pd.DataFrame([
-    ["R1", "SH A 1200", "Final Win %"],
-    [1, "浪漫勇士", 0.35],
-    [2, "金槍六十", 0.25],
-    [3, "加州星球", 0.15],
-    [4, "遨遊氣泡", 0.25],
-    ["R2", "HV A 1200", "Final Win %"],
-    [1, "超悅明駒", 0.30],
-    [2, "快如疾風", 0.25],
-    [3, "幸運有您", 0.20],
-])
-
-if not sheet_url:
-    races = parse_multi_race_sheet(mock_df)
-else:
-    try:
-        raw_df = pd.read_csv(sheet_url, header=None)
-        races = parse_multi_race_sheet(raw_df)
-    except Exception as e:
-        st.error(f"Error loading Google Sheet CSV: {e}")
-        st.stop()
-
-if not races:
-    st.error("No valid race data could be parsed from the provided Google Sheet.")
-    st.stop()
-
-# Race Selector Dropdown
-race_options = [f"{r['title']} ({r['track']})" for r in races]
-selected_race_idx = st.selectbox(
-    "Select Race to Bet On",
-    range(len(race_options)),
-    format_func=lambda x: race_options[x]
-)
-
-# Active Race Data
-selected_race = races[selected_race_idx]
-race_title = selected_race['title']
-track_code = selected_race['track']
-horse_list = selected_race['horses']
-
-# Track Rule Lookup Display
-rule_type = TRACK_STRATEGY_MAP.get(track_code, "Standard")
-st.info(f"**Selected:** {race_title} | **Track:** {track_code} | **Strategy Rule:** {rule_type}")
-
-# Live Odds Input Area
-st.subheader("2. Input Real-Time Tote Odds (T-3 min)")
-
-horses_input = []
-cols = st.columns(min(len(horse_list), 4))
-
-for idx, h in enumerate(horse_list):
-    col_idx = idx % 4
-    with cols[col_idx]:
-        st.caption(f"#{h['no']} {h['name']}")
-        st.text(f"Win%: {h['win_prob']*100:.1f}%")
-        live_odds = st.number_input(
-            f"Odds #{h['no']}",
-            min_value=1.0,
-            value=float(3.0 + idx),
-            step=0.1,
-            key=f"odds_{race_title}_{h['no']}"
-        )
-        horses_input.append({
-            'no': h['no'],
-            'name': h['name'],
-            'win_prob': h['win_prob'],
-            'live_odds': live_odds
+with tab_manual:
+    if data_df is None:
+        default_data = pd.DataFrame({
+            'Horse No': [1, 2, 3, 4, 5, 6],
+            'Horse Name': ['Romantic Warrior', 'California Spangle', 'Golden Sixty', 'Voyage Bubble', 'Beauty Eternal', 'Straight Arron'],
+            'Model Win %': [35.0, 25.0, 18.0, 12.0, 7.0, 3.0]
         })
+        data_df = st.data_editor(default_data, num_rows="dynamic")
 
-# Manual Quinella Odds Input
-if rule_type in ["Quin", "Standard"]:
-    with st.expander("Adjust Quinella Tote Odds (Optional)"):
-        for i in range(len(horses_input)):
-            for j in range(i + 1, len(horses_input)):
-                h1, h2 = horses_input[i], horses_input[j]
-                default_q = round(h1['live_odds'] * h2['live_odds'] * 0.40, 1)
-                st.number_input(
-                    f"Q Odds #{h1['no']} & #{h2['no']}",
-                    value=default_q,
-                    step=0.5,
-                    key=f"q_odds_{race_title}_{h1['no']}_{h2['no']}"
+if data_df is not None and not data_df.empty:
+    # Ensure standard column naming
+    required_cols = ['Horse No', 'Horse Name', 'Model Win %']
+    if not all(col in data_df.columns for col in required_cols):
+        st.error(f"Data must contain the following columns: {required_cols}")
+    else:
+        # Calculate Fair Odds and Minimum Acceptable Odds (+5% EV)
+        df_calc = data_df.copy()
+        df_calc['Win Prob (Dec)'] = df_calc['Model Win %'] / 100.0
+        df_calc['Fair Odds'] = df_calc['Win Prob (Dec)'].apply(lambda p: round(1.0 / p, 2) if p > 0 else 999.0)
+        
+        # Minimum Odds for +5% EV: Required Odds = 1.05 / Win_Probability
+        df_calc['Min Odds (+5% EV)'] = df_calc['Win Prob (Dec)'].apply(lambda p: round(1.05 / p, 2) if p > 0 else 999.0)
+
+        st.subheader("Price Floor & Trainer Audit Table")
+        st.write("Use the **Keep** column to uncheck/remove 'absurd' bets or horses that fail your trainer intent audit.")
+
+        # Add interactive selection column
+        if 'Keep' not in df_calc.columns:
+            df_calc.insert(0, 'Keep', True)
+
+        edited_df = st.data_editor(
+            df_calc[['Keep', 'Horse No', 'Horse Name', 'Model Win %', 'Fair Odds', 'Min Odds (+5% EV)']],
+            disabled=['Horse No', 'Horse Name', 'Model Win %', 'Fair Odds', 'Min Odds (+5% EV)'],
+            hide_index=True,
+            use_container_width=True
+        )
+
+        # Filtered contenders
+        contenders = edited_df[edited_df['Keep'] == True].copy()
+        
+        st.info(f"Active Contenders Remaining: **{len(contenders)} / {len(edited_df)}**")
+
+# ==============================================================================
+# PART 3: Dutching Calculator & Execution
+# ==============================================================================
+        st.divider()
+        st.header("2. Live Odds & Dutching Calculator")
+
+        if contenders.empty:
+            st.warning("No horses selected. Keep at least one horse checked in the audit table above.")
+        else:
+            st.write("Enter the **Live Market Odds** for your shortlisted horses to generate Dutching ratios.")
+
+            # Form to enter live market odds
+            with st.form("dutching_form"):
+                live_odds_input = {}
+                cols = st.columns(min(len(contenders), 4))
+                
+                for idx, (_, row) in enumerate(contenders.iterrows()):
+                    col = cols[idx % 4]
+                    horse_key = f"horse_{row['Horse No']}"
+                    default_min = float(row['Min Odds (+5% EV)'])
+                    
+                    live_odds_input[row['Horse No']] = col.number_input(
+                        f"#{row['Horse No']} {row['Horse Name']} (Min: {default_min})",
+                        min_value=1.01,
+                        value=default_min,
+                        step=0.1,
+                        key=horse_key
+                    )
+                
+                custom_stake = st.number_input(
+                    "Total Race Stake ($)",
+                    min_value=10.0,
+                    max_value=float(max_race_stake),
+                    value=float(max_race_stake),
+                    step=50.0,
+                    help="Defaults to your 5% bankroll cap. You can lower this amount, but cannot exceed 5%."
                 )
 
-# Calculate Decision
-if st.button("🚀 Calculate Final Bet Decisions", type="primary"):
-    bets, reason, mode = evaluate_bets(race_title, track_code, horses_input, bankroll)
-    
-    st.markdown("---")
-    st.subheader("3. Execution Output")
-    st.info(f"**Strategy Decision:** {reason}")
-    
-    if not bets:
-        st.warning("⛔ PASS - No selections meet the minimum +5% EV threshold.")
-    else:
-        total_spend = sum(b['stake'] for b in bets)
-        for b in bets:
-            st.success(
-                f"**{b['type']}** | **{b['selection']}** | Odds: **{b['odds']:.1f}** | "
-                f"EV: **+{b['ev']*100:.1f}%** $\rightarrow$ **STAKE: HK${b['stake']:.0f}**"
-            )
-        st.metric(
-            "Total Single-Race Outlay",
-            f"HK${total_spend:.0f}",
-            delta=f"{total_spend/bankroll*100:.1f}% of Bankroll"
-        )
+                calculate_btn = st.form_submit_button("Calculate Dutching Execution")
+
+            if calculate_btn:
+                dutch_data = []
+                inv_odds_sum = 0.0
+
+                for _, row in contenders.iterrows():
+                    h_no = row['Horse No']
+                    h_name = row['Horse Name']
+                    min_odds = row['Min Odds (+5% EV)']
+                    curr_odds = live_odds_input[h_no]
+                    
+                    # Inverse odds sum calculation for Dutching
+                    inv_odds_sum += (1.0 / curr_odds)
+                    
+                    is_value = curr_odds >= min_odds
+                    dutch_data.append({
+                        'Horse No': h_no,
+                        'Horse Name': h_name,
+                        'Model Win %': row['Model Win %'],
+                        'Min Odds (+5% EV)': min_odds,
+                        'Live Odds': curr_odds,
+                        'Value Check': "✅ Value" if is_value else "❌ Overvalued",
+                        'Inv Odds': 1.0 / curr_odds
+                    })
+
+                dutch_df = pd.DataFrame(dutch_data)
+
+                # Dutching Allocation Logic
+                # Stake_i = Total_Stake * ( (1/Odds_i) / Sum(1/Odds_k) )
+                dutch_df['Bet Ratio (%)'] = (dutch_df['Inv Odds'] / inv_odds_sum) * 100.0
+                dutch_df['Suggested Stake ($)'] = (dutch_df['Bet Ratio (%)'] / 100.0) * custom_stake
+                dutch_df['Suggested Stake ($)'] = dutch_df['Suggested Stake ($)'].round(1)
+
+                # Projected Returns
+                projected_payout = (custom_stake / inv_odds_sum) if inv_odds_sum > 0 else 0
+                projected_profit = projected_payout - custom_stake
+                roi_pct = (projected_profit / custom_stake) * 100.0 if custom_stake > 0 else 0
+
+                st.subheader("🎯 Execution Summary")
+                
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Total Investment", f"${custom_stake:.2f}")
+                m2.metric("Projected Payout", f"${projected_payout:.2f}")
+                m3.metric("Net Profit", f"${projected_profit:.2f}", delta=f"{roi_pct:.1f}% ROI")
+                m4.metric("Dutch Book Overround", f"{(inv_odds_sum * 100.0):.1f}%", delta="Profit Guaranteed" if inv_odds_sum < 1.0 else "High Market Takeout", delta_color="normal" if inv_odds_sum < 1.0 else "inverse")
+
+                st.dataframe(
+                    dutch_df[['Horse No', 'Horse Name', 'Live Odds', 'Min Odds (+5% EV)', 'Value Check', 'Bet Ratio (%)', 'Suggested Stake ($)']],
+                    hide_index=True,
+                    use_container_width=True
+                )
+
+                if any(dutch_df['Live Odds'] < dutch_df['Min Odds (+5% EV)']):
+                    st.warning("⚠️ One or more selected horses are currently below your Minimum Acceptable Odds (+5% EV). Consider unchecking overvalued runners in the audit table.")
+
+<ElicitationsGroup message="Next steps for your betting workflow:">
+  <Elicitation label="Add real-time odds tracking via HKJC API or Web Interceptor" query="Add the live odds API fetcher module into this updated Win-only Dutching app." />
+  <Elicitation label="Include dynamic bankroll logging and historical trade recording" query="Add a feature to log bets placed and dynamically update bankroll after race results." />
+</ElicitationsGroup>
