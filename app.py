@@ -1,20 +1,21 @@
 import streamlit as st
 import pandas as pd
+import itertools
 
 # ==============================================================================
 # Page Configuration
 # ==============================================================================
-st.set_page_config(page_title="HKJC Win-Only Quantitative Betting Engine", layout="wide")
+st.set_page_config(page_title="HKJC Win & Quinella Quantitative Engine", layout="wide")
 
 # ==============================================================================
-# Helper Function: Parse Custom HKJC Google Sheet Structure
+# Helper Functions: Parser & Harville Probability Engine
 # ==============================================================================
 def parse_custom_sheet(df_raw):
     """
-    Parses a multi-race sheet with structure:
+    Parses multi-race Google Sheets with format:
     Col A: 'R1' (Race) or Horse No (1-14)
-    Col B: Race details (e.g. 'HV A 1200') or Horse Name
-    Col C: 'Win%' header or Win Probability (0.15 or 15)
+    Col B: Race details / Horse Name
+    Col C: Win% header or Decimal/Percentage Win Probability
     """
     race_data = []
     current_race = "Race 1"
@@ -45,11 +46,7 @@ def parse_custom_sheet(df_raw):
                 try:
                     clean_c = col_c.replace('%', '').strip()
                     win_val = float(clean_c)
-                    
-                    if 0 < win_val <= 1.0:
-                        win_pct = round(win_val * 100.0, 2)
-                    else:
-                        win_pct = round(win_val, 2)
+                    win_pct = round(win_val * 100.0, 2) if 0 < win_val <= 1.0 else round(win_val, 2)
                 except ValueError:
                     continue
 
@@ -67,8 +64,34 @@ def parse_custom_sheet(df_raw):
         
     return pd.DataFrame(race_data), None
 
+
+def compute_harville_quinella(df_full):
+    """
+    Computes Harville Quinella probabilities for all pairs based on normalized field Win probabilities.
+    """
+    df = df_full.copy()
+    total_win_pct = df['Model Win %'].sum()
+    if total_win_pct <= 0:
+        return {}
+    
+    # Normalize win probabilities across the full field
+    p = {row['Horse No']: (row['Model Win %'] / total_win_pct) for _, row in df.iterrows()}
+    horses = list(p.keys())
+    
+    q_probs = {}
+    for h1, h2 in itertools.combinations(horses, 2):
+        p1, p2 = p[h1], p[h2]
+        # Harville Formula: P(1st h1, 2nd h2) + P(1st h2, 2nd h1)
+        if (1 - p1) > 0 and (1 - p2) > 0:
+            prob_q = p1 * (p2 / (1 - p1)) + p2 * (p1 / (1 - p2))
+        else:
+            prob_q = 0.0
+        q_probs[f"{min(h1, h2)}-{max(h1, h2)}"] = prob_q
+        
+    return q_probs
+
 # ==============================================================================
-# Sidebar: Bankroll & Risk Management
+# Sidebar: Bankroll & Risk Control
 # ==============================================================================
 st.sidebar.header("💰 Bankroll & Risk Control")
 
@@ -84,7 +107,6 @@ bankroll = st.sidebar.number_input(
 )
 st.session_state.bankroll = bankroll
 
-# Hard 5% bankroll cap ceiling
 max_race_stake = float(bankroll * 0.05)
 
 st.sidebar.metric(
@@ -95,25 +117,24 @@ st.sidebar.metric(
 st.sidebar.markdown("""
 ---
 **Active Risk Rules:**
-* 🎯 **Win-Only Mode:** Exotic pools disabled.
-* 🛡️ **Hard Cap Limit:** Maximum 5% bankroll per race.
-* 🛑 **Price Floor:** Auto-reject bets below Minimum Odds (+5% EV).
-* 💵 **HKJC Rule:** Stakes rounded to nearest HK$10.
+* 🎯 **Supported Pools:** Win & Quinella (Q).
+* 🛡️ **Hard Cap Ceiling:** Dynamic 5% bankroll limit per race.
+* 🛑 **Price Floor:** Auto-evaluates Minimum Odds (+5% EV).
+* 💵 **HKJC Rule:** Individual stakes rounded to nearest HK$10.
 """)
 
 # ==============================================================================
 # Main App Header
 # ==============================================================================
-st.title("🏇 HKJC Win-Only Decision Support Engine")
-st.caption("Hybrid System: Math Model Price Floor + Human Trainer Audit + Constrained Dutching")
+st.title("🏇 HKJC Win & Quinella Decision Support Engine")
+st.caption("Hybrid System: Harville Combination Engine + Multi-Pool Audit + Constrained Dutching")
 
 # ==============================================================================
-# PART 1 & 2: Data Input, Minimum Acceptable Odds, & Trainer Pruning
+# STEP 1: Model Input & Individual Horse Pruning
 # ==============================================================================
-st.header("1. Model Input & Trainer Audit")
+st.header("1. Field Input & Horse Audit")
 
 tab_sheet, tab_manual = st.tabs(["📊 Import Google Sheet / CSV", "✏️ Manual Input"])
-
 data_df = None
 
 with tab_sheet:
@@ -133,7 +154,7 @@ with tab_sheet:
         try:
             raw_df = pd.read_csv(sheet_url.strip(), header=None)
         except Exception as e:
-            st.error(f"Error loading Google Sheet URL. Ensure sheet is published/shared publicly as CSV: {e}")
+            st.error(f"Error loading Google Sheet URL: {e}")
 
     if raw_df is not None:
         parsed_df, err = parse_custom_sheet(raw_df)
@@ -154,118 +175,213 @@ with tab_manual:
         data_df = st.data_editor(default_data, num_rows="dynamic", key="manual_editor")
 
 if data_df is not None and not data_df.empty:
+    # Compute underlying Harville Quinella probabilities secretly across full field
+    full_q_probs = compute_harville_quinella(data_df)
+    
     df_calc = data_df.copy()
     df_calc['Win Prob (Dec)'] = df_calc['Model Win %'] / 100.0
-    df_calc['Fair Odds'] = df_calc['Win Prob (Dec)'].apply(lambda p: round(1.0 / p, 2) if p > 0 else 999.0)
-    df_calc['Min Odds (+5% EV)'] = df_calc['Win Prob (Dec)'].apply(lambda p: round(1.05 / p, 2) if p > 0 else 999.0)
+    df_calc['Win Fair Odds'] = df_calc['Win Prob (Dec)'].apply(lambda p: round(1.0 / p, 2) if p > 0 else 999.0)
+    df_calc['Win Min Odds (+5% EV)'] = df_calc['Win Prob (Dec)'].apply(lambda p: round(1.05 / p, 2) if p > 0 else 999.0)
 
-    st.subheader("Price Floor & Trainer Audit Table")
-    st.write("Uncheck **Keep** to eliminate horses that fail your trainer audit or expert judgment.")
+    st.subheader("Individual Horse Audit Table")
+    st.write("Uncheck **Keep** to eliminate horses from consideration. (Quinella probabilities update automatically in the background).")
 
     if 'Keep' not in df_calc.columns:
         df_calc.insert(0, 'Keep', True)
 
     edited_df = st.data_editor(
-        df_calc[['Keep', 'Horse No', 'Horse Name', 'Model Win %', 'Fair Odds', 'Min Odds (+5% EV)']],
-        disabled=['Horse No', 'Horse Name', 'Model Win %', 'Fair Odds', 'Min Odds (+5% EV)'],
+        df_calc[['Keep', 'Horse No', 'Horse Name', 'Model Win %', 'Win Fair Odds', 'Win Min Odds (+5% EV)']],
+        disabled=['Horse No', 'Horse Name', 'Model Win %', 'Win Fair Odds', 'Win Min Odds (+5% EV)'],
         hide_index=True,
         use_container_width=True
     )
 
     contenders = edited_df[edited_df['Keep'] == True].copy()
-    st.info(f"Active Contenders Remaining: **{len(contenders)} / {len(edited_df)}**")
+    st.info(f"Active Contenders Remaining: **{len(contenders)} / {len(edited_df)}** (Horses: {', '.join(map(str, contenders['Horse No'].tolist()))})")
 
 # ==============================================================================
-# PART 3: Dutching Calculator & HKJC Execution
+# STEP 2: Portfolio Builder (Win & Quinella Custom Combo Selection)
 # ==============================================================================
     st.divider()
-    st.header("2. Live Odds & Dutching Calculator")
+    st.header("2. Bet Selection & Value Floor Table")
 
-    if contenders.empty:
-        st.warning("No horses selected. Keep at least one horse checked in the audit table above.")
+    if len(contenders) < 1:
+        st.warning("Select at least one horse to build a betting portfolio.")
     else:
-        st.write("Enter the **Live Market Odds** for your shortlisted horses:")
+        st.write("Construct your portfolio by selecting individual **Win** bets and/or **Quinella** combinations among remaining contenders:")
 
-        with st.form("dutching_form"):
-            live_odds_input = {}
-            cols = st.columns(min(len(contenders), 4))
-            
-            for idx, (_, row) in enumerate(contenders.iterrows()):
-                col = cols[idx % 4]
-                horse_key = f"horse_{row['Horse No']}"
-                default_min = float(row['Min Odds (+5% EV)'])
-                
-                live_odds_input[row['Horse No']] = col.number_input(
-                    f"#{row['Horse No']} {row['Horse Name']} (Min: {default_min})",
-                    min_value=1.01,
-                    value=default_min,
-                    step=0.1,
-                    key=horse_key
-                )
-            
-            # Allows user manual entry up to 5% bankroll limit
-            custom_stake = st.number_input(
-                f"Target Total Race Stake ($) — Max Allowed: ${max_race_stake:.2f}",
-                min_value=10.0,
-                max_value=max_race_stake,
-                value=max_race_stake,
-                step=10.0,
-                help=f"Defaults to 5% bankroll cap (${max_race_stake:.2f}). You can reduce this amount (e.g. $200), but cannot exceed the maximum cap."
-            )
+        col_win_sec, col_q_sec = st.columns([1, 1.2])
 
-            calculate_btn = st.form_submit_button("Calculate Dutching Execution")
-
-        if calculate_btn:
-            dutch_data = []
-            inv_odds_sum = 0.0
-
+        # --- Sub-Section A: Win Bets ---
+        selected_win_bets = []
+        with col_win_sec:
+            st.subheader("🎯 Win Bets")
+            win_selection_data = []
             for _, row in contenders.iterrows():
-                h_no = row['Horse No']
-                h_name = row['Horse Name']
-                min_odds = row['Min Odds (+5% EV)']
-                curr_odds = live_odds_input[h_no]
-                
-                inv_odds_sum += (1.0 / curr_odds)
-                
-                is_value = curr_odds >= min_odds
-                dutch_data.append({
-                    'Horse No': h_no,
-                    'Horse Name': h_name,
+                win_selection_data.append({
+                    'Select': False,
+                    'Horse No': int(row['Horse No']),
+                    'Horse Name': row['Horse Name'],
                     'Model Win %': row['Model Win %'],
-                    'Min Odds (+5% EV)': min_odds,
-                    'Live Odds': curr_odds,
-                    'Value Check': "✅ Value" if is_value else "❌ Overvalued",
-                    'Inv Odds': 1.0 / curr_odds
+                    'Min Odds (+5% EV)': row['Win Min Odds (+5% EV)']
                 })
-
-            dutch_df = pd.DataFrame(dutch_data)
-
-            dutch_df['Bet Ratio (%)'] = (dutch_df['Inv Odds'] / inv_odds_sum) * 100.0
-            raw_stake = (dutch_df['Bet Ratio (%)'] / 100.0) * custom_stake
-
-            # Round stakes to nearest HK$10
-            dutch_df['Suggested Stake ($)'] = raw_stake.apply(lambda s: max(10, int(round(s / 10.0) * 10)) if s >= 5 else 0)
-
-            actual_total_stake = int(dutch_df['Suggested Stake ($)'].sum())
-            dutch_df['Est Payout ($)'] = (dutch_df['Suggested Stake ($)'] * dutch_df['Live Odds']).round(1)
+            win_sel_df = pd.DataFrame(win_selection_data)
             
-            min_payout = dutch_df[dutch_df['Suggested Stake ($)'] > 0]['Est Payout ($)'].min() if actual_total_stake > 0 else 0
-            net_profit = min_payout - actual_total_stake
-            roi_pct = (net_profit / actual_total_stake * 100.0) if actual_total_stake > 0 else 0
-
-            st.subheader("🎯 Execution Summary (HK$10 Units)")
-            
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Actual Total Bet", f"${actual_total_stake}")
-            m2.metric("Min Est. Payout", f"${min_payout:.1f}")
-            m3.metric("Est. Net Profit", f"${net_profit:.1f}", delta=f"{roi_pct:.1f}% ROI")
-            m4.metric("Dutch Book Overround", f"{(inv_odds_sum * 100.0):.1f}%")
-
-            st.dataframe(
-                dutch_df[['Horse No', 'Horse Name', 'Live Odds', 'Min Odds (+5% EV)', 'Value Check', 'Bet Ratio (%)', 'Suggested Stake ($)', 'Est Payout ($)']],
+            edited_win_sel = st.data_editor(
+                win_sel_df,
+                disabled=['Horse No', 'Horse Name', 'Model Win %', 'Min Odds (+5% EV)'],
                 hide_index=True,
+                key="win_bet_selector",
                 use_container_width=True
             )
+            
+            for _, row in edited_win_sel[edited_win_sel['Select'] == True].iterrows():
+                selected_win_bets.append({
+                    'Bet Code': f"WIN #{row['Horse No']}",
+                    'Bet Type': 'Win',
+                    'Label': f"#{row['Horse No']} {row['Horse Name']}",
+                    'Model %': row['Model %' if 'Model %' in row else 'Model Win %'],
+                    'Min Odds (+5% EV)': row['Min Odds (+5% EV)']
+                })
 
-            if any(dutch_df['Live Odds'] < dutch_df['Min Odds (+5% EV)']):
-                st.warning("⚠️ One or more selected horses are currently below your Minimum Acceptable Odds (+5% EV). Uncheck overvalued runners in the audit table if you want to exclude them.")
+        # --- Sub-Section B: Quinella Combinations ---
+        selected_q_bets = []
+        with col_q_sec:
+            st.subheader("🔄 Quinella Combinations")
+            contender_nos = sorted(contenders['Horse No'].tolist())
+            
+            if len(contender_nos) < 2:
+                st.info("Keep at least 2 horses checked in the Audit table above to enable Quinella combinations.")
+            else:
+                q_selection_data = []
+                for h1, h2 in itertools.combinations(contender_nos, 2):
+                    q_key = f"{min(h1, h2)}-{max(h1, h2)}"
+                    prob_q = full_q_probs.get(q_key, 0.0)
+                    
+                    fair_q_odds = round(1.0 / prob_q, 2) if prob_q > 0 else 999.0
+                    min_q_odds = round(1.05 / prob_q, 2) if prob_q > 0 else 999.0
+                    
+                    q_selection_data.append({
+                        'Select': False,
+                        'Combo': f"Q {q_key}",
+                        'Model Q %': round(prob_q * 100.0, 2),
+                        'Fair Odds': fair_q_odds,
+                        'Min Odds (+5% EV)': min_q_odds
+                    })
+                
+                q_sel_df = pd.DataFrame(q_selection_data)
+                
+                edited_q_sel = st.data_editor(
+                    q_sel_df,
+                    disabled=['Combo', 'Model Q %', 'Fair Odds', 'Min Odds (+5% EV)'],
+                    hide_index=True,
+                    key="q_bet_selector",
+                    use_container_width=True
+                )
+                
+                for _, row in edited_q_sel[edited_q_sel['Select'] == True].iterrows():
+                    selected_q_bets.append({
+                        'Bet Code': row['Combo'],
+                        'Bet Type': 'Quinella',
+                        'Label': row['Combo'],
+                        'Model %': row['Model Q %'],
+                        'Min Odds (+5% EV)': row['Min Odds (+5% EV)']
+                    })
+
+        active_portfolio = selected_win_bets + selected_q_bets
+
+# ==============================================================================
+# STEP 3: Multi-Pool Dutching Engine
+# ==============================================================================
+        st.divider()
+        st.header("3. Live Odds & Multi-Pool Dutching Execution")
+
+        if not active_portfolio:
+            st.info("👈 Check boxes in Section 2 to add Win or Quinella bets to your execution portfolio.")
+        else:
+            st.write(f"Enter **Live Market Odds** for your **{len(active_portfolio)}** chosen bets:")
+
+            with st.form("dutching_form"):
+                live_odds_inputs = {}
+                cols = st.columns(min(len(active_portfolio), 4))
+                
+                for idx, bet in enumerate(active_portfolio):
+                    col = cols[idx % 4]
+                    bet_code = bet['Bet Code']
+                    min_odds = float(bet['Min Odds (+5% EV)'])
+                    
+                    live_odds_inputs[bet_code] = col.number_input(
+                        f"{bet_code} (Min: {min_odds})",
+                        min_value=1.01,
+                        value=min_odds,
+                        step=0.1,
+                        key=f"live_odds_{bet_code}"
+                    )
+
+                custom_stake = st.number_input(
+                    f"Target Total Race Stake ($) — Max Allowed: ${max_race_stake:.2f}",
+                    min_value=10.0,
+                    max_value=max_race_stake,
+                    value=max_race_stake,
+                    step=10.0,
+                    help=f"Defaults to 5% bankroll ceiling (${max_race_stake:.2f}). You can manually reduce this stake amount."
+                )
+
+                calculate_btn = st.form_submit_button("Calculate Portfolio Dutching")
+
+            if calculate_btn:
+                dutch_rows = []
+                inv_odds_sum = 0.0
+
+                for bet in active_portfolio:
+                    code = bet['Bet Code']
+                    curr_odds = live_odds_inputs[code]
+                    min_odds = bet['Min Odds (+5% EV)']
+                    
+                    inv_odds = 1.0 / curr_odds
+                    inv_odds_sum += inv_odds
+                    
+                    dutch_rows.append({
+                        'Bet Code': code,
+                        'Type': bet['Bet Type'],
+                        'Model %': bet['Model %'],
+                        'Min Odds (+5% EV)': min_odds,
+                        'Live Odds': curr_odds,
+                        'Value Check': "✅ Value" if curr_odds >= min_odds else "❌ Overvalued",
+                        'Inv Odds': inv_odds
+                    })
+
+                dutch_df = pd.DataFrame(dutch_rows)
+                
+                # Bet Ratio calculation
+                dutch_df['Bet Ratio (%)'] = (dutch_df['Inv Odds'] / inv_odds_sum) * 100.0
+                raw_stakes = (dutch_df['Bet Ratio (%)'] / 100.0) * custom_stake
+                
+                # HKJC Rounding to nearest HK$10 (min $10 if bet ratio > 0)
+                dutch_df['Suggested Stake ($)'] = raw_stakes.apply(
+                    lambda s: max(10, int(round(s / 10.0) * 10)) if s >= 5 else 0
+                )
+
+                actual_total_stake = int(dutch_df['Suggested Stake ($)'].sum())
+                dutch_df['Est Payout ($)'] = (dutch_df['Suggested Stake ($)'] * dutch_df['Live Odds']).round(1)
+                
+                min_payout = dutch_df[dutch_df['Suggested Stake ($)'] > 0]['Est Payout ($)'].min() if actual_total_stake > 0 else 0
+                net_profit = min_payout - actual_total_stake
+                roi_pct = (net_profit / actual_total_stake * 100.0) if actual_total_stake > 0 else 0
+
+                st.subheader("🎯 Execution Summary (HK$10 Units)")
+                
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Actual Total Bet", f"${actual_total_stake}")
+                m2.metric("Min Floor Payout", f"${min_payout:.1f}")
+                m3.metric("Est. Floor Net Profit", f"${net_profit:.1f}", delta=f"{roi_pct:.1f}% ROI")
+                m4.metric("Dutch Book Overround", f"{(inv_odds_sum * 100.0):.1f}%")
+
+                st.dataframe(
+                    dutch_df[['Bet Code', 'Type', 'Live Odds', 'Min Odds (+5% EV)', 'Value Check', 'Bet Ratio (%)', 'Suggested Stake ($)', 'Est Payout ($)']],
+                    hide_index=True,
+                    use_container_width=True
+                )
+
+                if any(dutch_df['Live Odds'] < dutch_df['Min Odds (+5% EV)']):
+                    st.warning("⚠️ One or more selected bets are below your Minimum Acceptable Odds (+5% EV). Consider unchecking overvalued legs in Section 2.")
