@@ -5,10 +5,10 @@ import itertools
 # ==============================================================================
 # Page Configuration
 # ==============================================================================
-st.set_page_config(page_title="HKJC Win & Quinella Quantitative Engine", layout="wide")
+st.set_page_config(page_title="HKJC Win & Henery-Quinella Decision Engine", layout="wide")
 
 # ==============================================================================
-# Helper Functions: Parser & Harville Probability Engine
+# Helper Functions: Sheet Parser & Henery Probability Engine
 # ==============================================================================
 def parse_custom_sheet(df_raw):
     """
@@ -65,33 +65,39 @@ def parse_custom_sheet(df_raw):
     return pd.DataFrame(race_data), None
 
 
-def compute_harville_quinella(df_full):
+def compute_henery_quinella(df_full, theta=0.82):
     """
-    Computes Harville Quinella probabilities for all pairs based on normalized field Win probabilities.
+    Computes Henery's Power Discount Quinella probabilities for all pairs 
+    based on normalized field Win probabilities.
+    theta = 0.82 is empirically optimized for HKJC thoroughbred racing.
     """
     df = df_full.copy()
     total_win_pct = df['Model Win %'].sum()
     if total_win_pct <= 0:
         return {}
     
-    # Normalize win probabilities across the full field
+    # Normalize win probabilities across full field
     p = {row['Horse No']: (row['Model Win %'] / total_win_pct) for _, row in df.iterrows()}
     horses = list(p.keys())
     
     q_probs = {}
     for h1, h2 in itertools.combinations(horses, 2):
-        p1, p2 = p[h1], p[h2]
-        # Harville Formula: P(1st h1, 2nd h2) + P(1st h2, 2nd h1)
-        if (1 - p1) > 0 and (1 - p2) > 0:
-            prob_q = p1 * (p2 / (1 - p1)) + p2 * (p1 / (1 - p2))
-        else:
-            prob_q = 0.0
+        # Direction 1: h1 wins (1st), h2 comes second (2nd)
+        denom_1 = sum(p[k]**theta for k in horses if k != h1)
+        p_h2_given_h1 = (p[h2]**theta / denom_1) if denom_1 > 0 else 0.0
+        
+        # Direction 2: h2 wins (1st), h1 comes second (2nd)
+        denom_2 = sum(p[k]**theta for k in horses if k != h2)
+        p_h1_given_h2 = (p[h1]**theta / denom_2) if denom_2 > 0 else 0.0
+        
+        # Combined Quinella Probability
+        prob_q = (p[h1] * p_h2_given_h1) + (p[h2] * p_h1_given_h2)
         q_probs[f"{min(h1, h2)}-{max(h1, h2)}"] = prob_q
         
     return q_probs
 
 # ==============================================================================
-# Sidebar: Bankroll & Risk Control
+# Sidebar: Bankroll & Risk Management
 # ==============================================================================
 st.sidebar.header("💰 Bankroll & Risk Control")
 
@@ -116,18 +122,18 @@ st.sidebar.metric(
 
 st.sidebar.markdown("""
 ---
-**Active Risk Rules:**
+**Active Engine Settings:**
+* 🧠 **Quinella Model:** Henery Power Discount ($\theta=0.82$).
 * 🎯 **Supported Pools:** Win & Quinella (Q).
-* 🛡️ **Hard Cap Ceiling:** Dynamic 5% bankroll limit per race.
-* 🛑 **Price Floor:** Auto-evaluates Minimum Odds (+5% EV).
-* 💵 **HKJC Rule:** Individual stakes rounded to nearest HK$10.
+* 🛡️ **Hard Cap Limit:** Max 5% bankroll ceiling per race.
+* 💵 **HKJC Unit Rule:** Individual bets rounded to nearest HK$10.
 """)
 
 # ==============================================================================
 # Main App Header
 # ==============================================================================
-st.title("🏇 HKJC Win & Quinella Decision Support Engine")
-st.caption("Hybrid System: Harville Combination Engine + Multi-Pool Audit + Constrained Dutching")
+st.title("🏇 HKJC Win & Henery-Quinella Decision Support Engine")
+st.caption("Hybrid System: Henery Order Statistics + Trainer Audit + Multi-Pool Constrained Dutching")
 
 # ==============================================================================
 # STEP 1: Model Input & Individual Horse Pruning
@@ -175,8 +181,8 @@ with tab_manual:
         data_df = st.data_editor(default_data, num_rows="dynamic", key="manual_editor")
 
 if data_df is not None and not data_df.empty:
-    # Compute underlying Harville Quinella probabilities secretly across full field
-    full_q_probs = compute_harville_quinella(data_df)
+    # Compute underlying Henery Quinella probabilities secretly across full field
+    full_q_probs = compute_henery_quinella(data_df, theta=0.82)
     
     df_calc = data_df.copy()
     df_calc['Win Prob (Dec)'] = df_calc['Model Win %'] / 100.0
@@ -184,7 +190,7 @@ if data_df is not None and not data_df.empty:
     df_calc['Win Min Odds (+5% EV)'] = df_calc['Win Prob (Dec)'].apply(lambda p: round(1.05 / p, 2) if p > 0 else 999.0)
 
     st.subheader("Individual Horse Audit Table")
-    st.write("Uncheck **Keep** to eliminate horses from consideration. (Quinella probabilities update automatically in the background).")
+    st.write("Uncheck **Keep** to eliminate horses from consideration. (Henery Quinella probabilities update automatically in the background).")
 
     if 'Keep' not in df_calc.columns:
         df_calc.insert(0, 'Keep', True)
@@ -200,7 +206,7 @@ if data_df is not None and not data_df.empty:
     st.info(f"Active Contenders Remaining: **{len(contenders)} / {len(edited_df)}** (Horses: {', '.join(map(str, contenders['Horse No'].tolist()))})")
 
 # ==============================================================================
-# STEP 2: Portfolio Builder (Win & Quinella Custom Combo Selection)
+# STEP 2: Portfolio Builder (Win & Henery Quinella Custom Combo Selection)
 # ==============================================================================
     st.divider()
     st.header("2. Bet Selection & Value Floor Table")
@@ -208,7 +214,7 @@ if data_df is not None and not data_df.empty:
     if len(contenders) < 1:
         st.warning("Select at least one horse to build a betting portfolio.")
     else:
-        st.write("Construct your portfolio by selecting individual **Win** bets and/or **Quinella** combinations among remaining contenders:")
+        st.write("Construct your portfolio by selecting individual **Win** bets and/or **Henery Quinella** combinations among remaining contenders:")
 
         col_win_sec, col_q_sec = st.columns([1, 1.2])
 
@@ -240,14 +246,14 @@ if data_df is not None and not data_df.empty:
                     'Bet Code': f"WIN #{row['Horse No']}",
                     'Bet Type': 'Win',
                     'Label': f"#{row['Horse No']} {row['Horse Name']}",
-                    'Model %': row['Model %' if 'Model %' in row else 'Model Win %'],
+                    'Model %': row['Model Win %'],
                     'Min Odds (+5% EV)': row['Min Odds (+5% EV)']
                 })
 
-        # --- Sub-Section B: Quinella Combinations ---
+        # --- Sub-Section B: Henery Quinella Combinations ---
         selected_q_bets = []
         with col_q_sec:
-            st.subheader("🔄 Quinella Combinations")
+            st.subheader("🔄 Henery Quinella Combinations")
             contender_nos = sorted(contenders['Horse No'].tolist())
             
             if len(contender_nos) < 2:
@@ -264,7 +270,7 @@ if data_df is not None and not data_df.empty:
                     q_selection_data.append({
                         'Select': False,
                         'Combo': f"Q {q_key}",
-                        'Model Q %': round(prob_q * 100.0, 2),
+                        'Henery Q %': round(prob_q * 100.0, 2),
                         'Fair Odds': fair_q_odds,
                         'Min Odds (+5% EV)': min_q_odds
                     })
@@ -273,7 +279,7 @@ if data_df is not None and not data_df.empty:
                 
                 edited_q_sel = st.data_editor(
                     q_sel_df,
-                    disabled=['Combo', 'Model Q %', 'Fair Odds', 'Min Odds (+5% EV)'],
+                    disabled=['Combo', 'Henery Q %', 'Fair Odds', 'Min Odds (+5% EV)'],
                     hide_index=True,
                     key="q_bet_selector",
                     use_container_width=True
@@ -284,7 +290,7 @@ if data_df is not None and not data_df.empty:
                         'Bet Code': row['Combo'],
                         'Bet Type': 'Quinella',
                         'Label': row['Combo'],
-                        'Model %': row['Model Q %'],
+                        'Model %': row['Henery Q %'],
                         'Min Odds (+5% EV)': row['Min Odds (+5% EV)']
                     })
 
@@ -297,7 +303,7 @@ if data_df is not None and not data_df.empty:
         st.header("3. Live Odds & Multi-Pool Dutching Execution")
 
         if not active_portfolio:
-            st.info("👈 Check boxes in Section 2 to add Win or Quinella bets to your execution portfolio.")
+            st.info("👈 Check boxes in Section 2 to add Win or Henery Quinella bets to your execution portfolio.")
         else:
             st.write(f"Enter **Live Market Odds** for your **{len(active_portfolio)}** chosen bets:")
 
@@ -353,11 +359,10 @@ if data_df is not None and not data_df.empty:
 
                 dutch_df = pd.DataFrame(dutch_rows)
                 
-                # Bet Ratio calculation
                 dutch_df['Bet Ratio (%)'] = (dutch_df['Inv Odds'] / inv_odds_sum) * 100.0
                 raw_stakes = (dutch_df['Bet Ratio (%)'] / 100.0) * custom_stake
                 
-                # HKJC Rounding to nearest HK$10 (min $10 if bet ratio > 0)
+                # HKJC Rounding to nearest HK$10
                 dutch_df['Suggested Stake ($)'] = raw_stakes.apply(
                     lambda s: max(10, int(round(s / 10.0) * 10)) if s >= 5 else 0
                 )
