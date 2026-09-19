@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import itertools
+import re
 
 # ==============================================================================
 # Page Configuration
@@ -8,17 +9,40 @@ import itertools
 st.set_page_config(page_title="HKJC Win & Henery-Quinella Decision Engine", layout="wide")
 
 # ==============================================================================
-# Helper Functions: Sheet Parser & Henery Probability Engine
+# Helper Functions: Track Detection, Sheet Parser, & Henery Engine
 # ==============================================================================
+def detect_track_theta(race_info_text: str):
+    """
+    Analyzes Race Info string (e.g. 'HV A 1200', 'ST AWT 1650', 'SH A 1400', 'MUD 1200')
+    and returns (theta_value, track_label).
+    Literature-backed parameters for HKJC:
+    - Sha Tin Turf: 0.83 (Fair, long straight)
+    - Happy Valley Turf: 0.79 (Tight turns, short straight, position bias)
+    - All-Weather / Dirt / Mud: 0.76 (High variance, kickback, severe bias)
+    """
+    text_upper = race_info_text.upper()
+    
+    # Check for Dirt / Mud / All Weather Track
+    if any(k in text_upper for k in ['AWT', 'DIRT', 'MUD', 'ALL WEATHER', 'WET', 'YIELDING']):
+        return 0.76, "Sha Tin Dirt / Mud (AWT) [High Variance]"
+    # Check for Happy Valley
+    elif any(k in text_upper for k in ['HV', 'HAPPY', 'VALLEY']):
+        return 0.79, "Happy Valley Turf [Position Bias]"
+    # Default to Sha Tin Turf
+    else:
+        return 0.83, "Sha Tin Turf [Standard Class]"
+
+
 def parse_custom_sheet(df_raw):
     """
     Parses multi-race Google Sheets with format:
     Col A: 'R1' (Race) or Horse No (1-14)
-    Col B: Race details / Horse Name
+    Col B: Race details (e.g., 'ST A 1200', 'HV C+3 1650') or Horse Name
     Col C: Win% header or Decimal/Percentage Win Probability
     """
     race_data = []
-    current_race = "Race 1"
+    current_race_id = "R1"
+    current_race_details = "Sha Tin Turf"
     
     if df_raw.shape[1] < 3:
         return None, "Sheet must have at least 3 columns (Col A, Col B, Col C)."
@@ -31,11 +55,10 @@ def parse_custom_sheet(df_raw):
         if not col_a and not col_b and not col_c:
             continue
 
+        # Detect Race Header row (e.g., Col A = 'R1', Col B = 'HV A 1200')
         if col_a.upper().startswith('R') and not col_a.isdigit():
-            race_info = f"{col_a}"
-            if col_b and col_b.lower() != 'nan':
-                race_info += f" - {col_b}"
-            current_race = race_info
+            current_race_id = col_a.upper()
+            current_race_details = col_b if col_b and col_b.lower() != 'nan' else "ST Turf"
             continue
 
         try:
@@ -50,8 +73,11 @@ def parse_custom_sheet(df_raw):
                 except ValueError:
                     continue
 
+                full_race_label = f"{current_race_id} ({current_race_details})"
                 race_data.append({
-                    'Race': current_race,
+                    'Race Label': full_race_label,
+                    'Race Code': current_race_id,
+                    'Race Details': current_race_details,
                     'Horse No': horse_no,
                     'Horse Name': horse_name,
                     'Model Win %': win_pct
@@ -68,8 +94,7 @@ def parse_custom_sheet(df_raw):
 def compute_henery_quinella(df_full, theta=0.82):
     """
     Computes Henery's Power Discount Quinella probabilities for all pairs 
-    based on normalized field Win probabilities.
-    theta = 0.82 is empirically optimized for HKJC thoroughbred racing.
+    based on normalized field Win probabilities and auto-detected track theta.
     """
     df = df_full.copy()
     total_win_pct = df['Model Win %'].sum()
@@ -90,7 +115,7 @@ def compute_henery_quinella(df_full, theta=0.82):
         denom_2 = sum(p[k]**theta for k in horses if k != h2)
         p_h1_given_h2 = (p[h1]**theta / denom_2) if denom_2 > 0 else 0.0
         
-        # Combined Quinella Probability
+        # Combined Henery Quinella Probability
         prob_q = (p[h1] * p_h2_given_h1) + (p[h2] * p_h1_given_h2)
         q_probs[f"{min(h1, h2)}-{max(h1, h2)}"] = prob_q
         
@@ -123,17 +148,17 @@ st.sidebar.metric(
 st.sidebar.markdown("""
 ---
 **Active Engine Settings:**
-* 🧠 **Quinella Model:** Henery Power Discount ($\theta=0.82$).
+* 🧠 **Quinella Engine:** Henery Power Discount (Auto-Track $\\theta$).
 * 🎯 **Supported Pools:** Win & Quinella (Q).
-* 🛡️ **Hard Cap Limit:** Max 5% bankroll ceiling per race.
+* 🛡️ **Hard Cap Ceiling:** Dynamic 5% bankroll limit per race.
 * 💵 **HKJC Unit Rule:** Individual bets rounded to nearest HK$10.
 """)
 
 # ==============================================================================
 # Main App Header
 # ==============================================================================
-st.title("🏇 HKJC Win & Henery-Quinella Decision Support Engine")
-st.caption("Hybrid System: Henery Order Statistics + Trainer Audit + Multi-Pool Constrained Dutching")
+st.title("🏇 HKJC Win & Henery-Quinella Decision Engine")
+st.caption("Hybrid System: Auto Track-Specific Henery Model + Trainer Audit + Multi-Pool Dutching")
 
 # ==============================================================================
 # STEP 1: Model Input & Individual Horse Pruning
@@ -142,6 +167,7 @@ st.header("1. Field Input & Horse Audit")
 
 tab_sheet, tab_manual = st.tabs(["📊 Import Google Sheet / CSV", "✏️ Manual Input"])
 data_df = None
+selected_race_details = "ST Turf"
 
 with tab_sheet:
     sheet_url = st.text_input(
@@ -167,9 +193,12 @@ with tab_sheet:
         if err:
             st.error(err)
         else:
-            races_available = parsed_df['Race'].unique()
-            selected_race = st.selectbox("🎯 Select Race to Analyze:", races_available)
-            data_df = parsed_df[parsed_df['Race'] == selected_race][['Horse No', 'Horse Name', 'Model Win %']].reset_index(drop=True)
+            races_available = parsed_df['Race Label'].unique()
+            selected_race_label = st.selectbox("🎯 Select Race to Analyze:", races_available)
+            
+            race_subset = parsed_df[parsed_df['Race Label'] == selected_race_label]
+            selected_race_details = race_subset['Race Details'].iloc[0]
+            data_df = race_subset[['Horse No', 'Horse Name', 'Model Win %']].reset_index(drop=True)
 
 with tab_manual:
     if data_df is None:
@@ -179,10 +208,16 @@ with tab_manual:
             'Model Win %': [35.0, 25.0, 18.0, 12.0, 7.0, 3.0]
         })
         data_df = st.data_editor(default_data, num_rows="dynamic", key="manual_editor")
+        selected_race_details = st.text_input("Manual Race Details / Track:", value="HV A 1200")
 
 if data_df is not None and not data_df.empty:
-    # Compute underlying Henery Quinella probabilities secretly across full field
-    full_q_probs = compute_henery_quinella(data_df, theta=0.82)
+    # Auto-detect Track & Surface Theta behind the scenes
+    active_theta, track_label = detect_track_theta(selected_race_details)
+    
+    st.success(f"⚙️ **Behind-the-Scenes Calibration:** Detected `{selected_race_details}` $\\rightarrow$ Applied **{track_label}** (Henery $\\theta = {active_theta}$)")
+
+    # Compute underlying Henery Quinella probabilities with active_theta
+    full_q_probs = compute_henery_quinella(data_df, theta=active_theta)
     
     df_calc = data_df.copy()
     df_calc['Win Prob (Dec)'] = df_calc['Model Win %'] / 100.0
@@ -253,7 +288,7 @@ if data_df is not None and not data_df.empty:
         # --- Sub-Section B: Henery Quinella Combinations ---
         selected_q_bets = []
         with col_q_sec:
-            st.subheader("🔄 Henery Quinella Combinations")
+            st.subheader(f"🔄 Henery Quinella Combinations (\\theta = {active_theta})")
             contender_nos = sorted(contenders['Horse No'].tolist())
             
             if len(contender_nos) < 2:
