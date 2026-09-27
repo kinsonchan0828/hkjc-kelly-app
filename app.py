@@ -224,14 +224,39 @@ if data_df is not None and not data_df.empty:
     df_calc['Win Fair Odds'] = df_calc['Win Prob (Dec)'].apply(lambda p: round(1.0 / p, 2) if p > 0 else 999.0)
     df_calc['Win Min Odds (+5% EV)'] = df_calc['Win Prob (Dec)'].apply(lambda p: round(1.05 / p, 2) if p > 0 else 999.0)
 
-    st.subheader("Individual Horse Audit Table")
-    st.write("Uncheck **Keep** to eliminate horses from consideration. (Henery Quinella probabilities update automatically in the background).")
+    st.subheader("Price Floor & Trainer Audit Table")
+    
+    col_audit_desc, col_highlight_ctrl = st.columns([2.2, 1])
+    with col_audit_desc:
+        st.write("Uncheck **Keep** to eliminate horses from consideration. (Henery Quinella probabilities update automatically).")
+    with col_highlight_ctrl:
+        top_n_val = st.number_input(
+            "💡 Highlight Top N Win % Horses:",
+            min_value=1,
+            max_value=max(1, len(df_calc)),
+            value=min(3, len(df_calc)),
+            step=1,
+            help="Highlights the horses with the highest Model Win % in bright yellow."
+        )
+
+    # Determine cutoff value for Top N Win %
+    top_n_cutoffs = df_calc['Model Win %'].nlargest(top_n_val).tolist()
+    cutoff_val = top_n_cutoffs[-1] if top_n_cutoffs else 0.0
+
+    # Custom row styling function (yellow background for Top N)
+    def highlight_top_n(row):
+        if row['Model Win %'] >= cutoff_val and row['Model Win %'] > 0:
+            return ['background-color: #FFFF99; color: #000000; font-weight: bold;'] * len(row)
+        return [''] * len(row)
 
     if 'Keep' not in df_calc.columns:
         df_calc.insert(0, 'Keep', True)
 
+    display_df = df_calc[['Keep', 'Horse No', 'Horse Name', 'Model Win %', 'Win Fair Odds', 'Win Min Odds (+5% EV)']]
+    styled_df = display_df.style.apply(highlight_top_n, axis=1)
+
     edited_df = st.data_editor(
-        df_calc[['Keep', 'Horse No', 'Horse Name', 'Model Win %', 'Win Fair Odds', 'Win Min Odds (+5% EV)']],
+        styled_df,
         disabled=['Horse No', 'Horse Name', 'Model Win %', 'Win Fair Odds', 'Win Min Odds (+5% EV)'],
         hide_index=True,
         use_container_width=True
@@ -405,17 +430,49 @@ if data_df is not None and not data_df.empty:
                 actual_total_stake = int(dutch_df['Suggested Stake ($)'].sum())
                 dutch_df['Est Payout ($)'] = (dutch_df['Suggested Stake ($)'] * dutch_df['Live Odds']).round(1)
                 
-                min_payout = dutch_df[dutch_df['Suggested Stake ($)'] > 0]['Est Payout ($)'].min() if actual_total_stake > 0 else 0
-                net_profit = min_payout - actual_total_stake
-                roi_pct = (net_profit / actual_total_stake * 100.0) if actual_total_stake > 0 else 0
+                # --- Multi-Pool Scenario Evaluation (Min Floor vs Max Stacked Profit) ---
+                all_horses_in_race = sorted(data_df['Horse No'].tolist())
+                stake_lookup = dict(zip(dutch_df['Bet Code'], dutch_df['Suggested Stake ($)']))
+                odds_lookup = dict(zip(dutch_df['Bet Code'], dutch_df['Live Odds']))
+
+                scenario_profits = []
+                for h1 in all_horses_in_race:
+                    for h2 in all_horses_in_race:
+                        if h1 == h2:
+                            continue
+                        
+                        win_code = f"WIN #{h1}"
+                        q_code = f"Q {min(h1, h2)}-{max(h1, h2)}"
+                        
+                        payout = 0.0
+                        if win_code in stake_lookup and stake_lookup[win_code] > 0:
+                            payout += stake_lookup[win_code] * odds_lookup[win_code]
+                        if q_code in stake_lookup and stake_lookup[q_code] > 0:
+                            payout += stake_lookup[q_code] * odds_lookup[q_code]
+                        
+                        if payout > 0:
+                            profit = payout - actual_total_stake
+                            scenario_profits.append(profit)
+
+                if scenario_profits:
+                    min_floor_profit = min(scenario_profits)
+                    max_total_profit = max(scenario_profits)
+                else:
+                    min_floor_profit = 0.0
+                    max_total_profit = 0.0
+
+                min_payout = min_floor_profit + actual_total_stake
+                min_roi_pct = (min_floor_profit / actual_total_stake * 100.0) if actual_total_stake > 0 else 0
+                max_roi_pct = (max_total_profit / actual_total_stake * 100.0) if actual_total_stake > 0 else 0
 
                 st.subheader("🎯 Execution Summary (HK$10 Units)")
                 
-                m1, m2, m3, m4 = st.columns(4)
+                m1, m2, m3, m4, m5 = st.columns(5)
                 m1.metric("Actual Total Bet", f"${actual_total_stake}")
                 m2.metric("Min Floor Payout", f"${min_payout:.1f}")
-                m3.metric("Est. Floor Net Profit", f"${net_profit:.1f}", delta=f"{roi_pct:.1f}% ROI")
-                m4.metric("Dutch Book Overround", f"{(inv_odds_sum * 100.0):.1f}%")
+                m3.metric("Min Floor Profit", f"${min_floor_profit:.1f}", delta=f"{min_roi_pct:.1f}% Min ROI")
+                m4.metric("Max Total Profit", f"${max_total_profit:.1f}", delta=f"{max_roi_pct:.1f}% Max ROI" if max_total_profit > min_floor_profit else None)
+                m5.metric("Dutch Book Overround", f"{(inv_odds_sum * 100.0):.1f}%")
 
                 st.dataframe(
                     dutch_df[['Bet Code', 'Type', 'Live Odds', 'Min Odds (+5% EV)', 'Value Check', 'Bet Ratio (%)', 'Suggested Stake ($)', 'Est Payout ($)']],
