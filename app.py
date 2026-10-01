@@ -9,12 +9,11 @@ import re
 st.set_page_config(page_title="HKJC Win & Henery-Quinella Decision Engine", layout="wide")
 
 # ==============================================================================
-# Helper Functions: Track Detection, Sheet Parser, & Henery Engine
+# Helper Functions: Track Detection, Tier Engine, & Henery Model
 # ==============================================================================
 def detect_track_theta(race_info_text: str):
     """
-    Analyzes Race Info string (e.g. 'HV A 1200', 'ST AWT 1650', 'SH A 1400', 'MUD 1200')
-    and returns (theta_value, track_label).
+    Analyzes Race Info string and returns (theta_value, track_label).
     Literature-backed parameters for HKJC:
     - Sha Tin Turf: 0.83 (Fair, long straight)
     - Happy Valley Turf: 0.79 (Tight turns, short straight, position bias)
@@ -22,27 +21,94 @@ def detect_track_theta(race_info_text: str):
     """
     text_upper = race_info_text.upper()
     
-    # Check for Dirt / Mud / All Weather Track
     if any(k in text_upper for k in ['AWT', 'DIRT', 'MUD', 'ALL WEATHER', 'WET', 'YIELDING']):
         return 0.76, "Sha Tin Dirt / Mud (AWT) [High Variance]"
-    # Check for Happy Valley
     elif any(k in text_upper for k in ['HV', 'HAPPY', 'VALLEY']):
         return 0.79, "Happy Valley Turf [Position Bias]"
-    # Default to Sha Tin Turf
     else:
         return 0.83, "Sha Tin Turf [Standard Class]"
+
+
+def classify_race_tier(race_details_text: str, df: pd.DataFrame):
+    """
+    Classifies race into Tiers 1-4 based on Class, Probability Concentration,
+    and Dominance Gap between runners.
+    Returns: (tier_num, tier_title, recommended_max_stake_pct, ev_multiplier, badge_color)
+    """
+    text_upper = race_details_text.upper()
+    
+    # Check for Tier 4: Class 5, Griffin, Maiden
+    is_class_5_or_griffin = any(k in text_upper for k in [
+        'C5', 'CLASS 5', 'CLASS5', 'GRIFFIN', 'MAIDEN', 'RATING 40-0', 'RESTRICTED'
+    ])
+    
+    if is_class_5_or_griffin:
+        return (
+            4, 
+            "🚨 Tier 4: Class 5 / Griffin (High Noise — Recommended AUTO-PASS)", 
+            0.015,  # 1.5% max stake cap
+            1.15,   # +15% EV floor required
+            "red"
+        )
+    
+    # Extract top 4 win percentages for gap analysis
+    top_win_pcts = df['Model Win %'].nlargest(4).tolist()
+    p1 = top_win_pcts[0] if len(top_win_pcts) > 0 else 0.0
+    p2 = top_win_pcts[1] if len(top_win_pcts) > 1 else 0.0
+    p3 = top_win_pcts[2] if len(top_win_pcts) > 2 else 0.0
+    p4 = top_win_pcts[3] if len(top_win_pcts) > 3 else 0.0
+    
+    top_2_sum = p1 + p2
+    top_3_sum = p1 + p2 + p3
+    
+    gap_2_3 = p2 - p3
+    gap_3_4 = p3 - p4
+
+    # Tier 1: Dominant 2-Horse Core
+    # Primary: Top 2 >= 45% OR Top 1 >= 28%
+    # Gap Rule: Top 2 >= 42% AND Gap(2->3) >= 7%
+    if (top_2_sum >= 45.0) or (p1 >= 28.0) or (top_2_sum >= 42.0 and gap_2_3 >= 7.0):
+        return (
+            1, 
+            "🥇 Tier 1: Prime Dominant Core (Top 2 Win % ≥ 45% or Clear Gap — High Confidence)", 
+            0.05,   # 5.0% max stake cap
+            1.05,   # +5% EV floor
+            "green"
+        )
+    
+    # Tier 2: Solid 3-Horse Core
+    # Primary: Top 3 >= 48%
+    # Gap Rule: Top 3 >= 44% AND Gap(3->4) >= 5%
+    elif (top_3_sum >= 48.0) or (top_3_sum >= 44.0 and gap_3_4 >= 5.0):
+        return (
+            2, 
+            "🥈 Tier 2: Solid 3-Horse Core (Top 3 Win % ≥ 48% or Clear Gap — Moderate Confidence)", 
+            0.04,   # 4.0% max stake cap
+            1.05,   # +5% EV floor
+            "blue"
+        )
+    
+    # Tier 3: Wide-Open / Fragmented (Top 3 < 44% or no clear gap)
+    else:
+        return (
+            3, 
+            "🥉 Tier 3: Wide-Open / Fragmented (Top 3 Win % < 44% — High Variance)", 
+            0.025,  # 2.5% max stake cap
+            1.10,   # +10% EV floor required
+            "orange"
+        )
 
 
 def parse_custom_sheet(df_raw):
     """
     Parses multi-race Google Sheets with format:
     Col A: 'R1' (Race) or Horse No (1-14)
-    Col B: Race details (e.g., 'ST A 1200', 'HV C+3 1650') or Horse Name
+    Col B: Race details (e.g., 'ST C4 1200', 'HV C5 1650') or Horse Name
     Col C: Win% header or Decimal/Percentage Win Probability
     """
     race_data = []
     current_race_id = "R1"
-    current_race_details = "Sha Tin Turf"
+    current_race_details = "ST C4 1200"
     
     if df_raw.shape[1] < 3:
         return None, "Sheet must have at least 3 columns (Col A, Col B, Col C)."
@@ -55,10 +121,9 @@ def parse_custom_sheet(df_raw):
         if not col_a and not col_b and not col_c:
             continue
 
-        # Detect Race Header row (e.g., Col A = 'R1', Col B = 'HV A 1200')
         if col_a.upper().startswith('R') and not col_a.isdigit():
             current_race_id = col_a.upper()
-            current_race_details = col_b if col_b and col_b.lower() != 'nan' else "ST Turf"
+            current_race_details = col_b if col_b and col_b.lower() != 'nan' else "ST C4 1200"
             continue
 
         try:
@@ -101,21 +166,17 @@ def compute_henery_quinella(df_full, theta=0.82):
     if total_win_pct <= 0:
         return {}
     
-    # Normalize win probabilities across full field
     p = {row['Horse No']: (row['Model Win %'] / total_win_pct) for _, row in df.iterrows()}
     horses = list(p.keys())
     
     q_probs = {}
     for h1, h2 in itertools.combinations(horses, 2):
-        # Direction 1: h1 wins (1st), h2 comes second (2nd)
         denom_1 = sum(p[k]**theta for k in horses if k != h1)
         p_h2_given_h1 = (p[h2]**theta / denom_1) if denom_1 > 0 else 0.0
         
-        # Direction 2: h2 wins (1st), h1 comes second (2nd)
         denom_2 = sum(p[k]**theta for k in horses if k != h2)
         p_h1_given_h2 = (p[h1]**theta / denom_2) if denom_2 > 0 else 0.0
         
-        # Combined Henery Quinella Probability
         prob_q = (p[h1] * p_h2_given_h1) + (p[h2] * p_h1_given_h2)
         q_probs[f"{min(h1, h2)}-{max(h1, h2)}"] = prob_q
         
@@ -138,36 +199,29 @@ bankroll = st.sidebar.number_input(
 )
 st.session_state.bankroll = bankroll
 
-max_race_stake = float(bankroll * 0.05)
-
-st.sidebar.metric(
-    label="Max Allowed Stake (5% Cap)",
-    value=f"${max_race_stake:.2f}"
-)
-
 st.sidebar.markdown("""
 ---
-**Active Engine Settings:**
+**Active Engine Rules:**
+* 🏷️ **Tier Classification:** Gap-Adjusted Tiers 1–4 Engine.
 * 🧠 **Quinella Engine:** Henery Power Discount (Auto-Track $\\theta$).
-* 🎯 **Supported Pools:** Win & Quinella (Q).
-* 🛡️ **Hard Cap Ceiling:** Dynamic 5% bankroll limit per race.
-* 💵 **HKJC Unit Rule:** Individual bets rounded to nearest HK$10.
+* 🛡️ **Dynamic Stake Cap:** Scaled by Tier Confidence (1.5% to 5.0%).
+* 💵 **HKJC Unit Rule:** Stakes rounded to nearest HK$10.
 """)
 
 # ==============================================================================
 # Main App Header
 # ==============================================================================
 st.title("🏇 HKJC Win & Henery-Quinella Decision Engine")
-st.caption("Hybrid System: Auto Track-Specific Henery Model + Trainer Audit + Multi-Pool Dutching")
+st.caption("Hybrid System: Auto Tier Identification + Track-Specific Henery Model + Multi-Pool Dutching")
 
 # ==============================================================================
-# STEP 1: Model Input & Individual Horse Pruning
+# STEP 1: Model Input, Tier Identification & Horse Audit
 # ==============================================================================
-st.header("1. Field Input & Horse Audit")
+st.header("1. Field Input, Tier Identification & Audit")
 
 tab_sheet, tab_manual = st.tabs(["📊 Import Google Sheet / CSV", "✏️ Manual Input"])
 data_df = None
-selected_race_details = "ST Turf"
+selected_race_details = "ST C4 1200"
 
 with tab_sheet:
     sheet_url = st.text_input(
@@ -208,21 +262,38 @@ with tab_manual:
             'Model Win %': [35.0, 25.0, 18.0, 12.0, 7.0, 3.0]
         })
         data_df = st.data_editor(default_data, num_rows="dynamic", key="manual_editor")
-        selected_race_details = st.text_input("Manual Race Details / Track:", value="HV A 1200")
+        selected_race_details = st.text_input("Manual Race Details / Track:", value="ST C4 1200")
 
 if data_df is not None and not data_df.empty:
     # Auto-detect Track & Surface Theta behind the scenes
     active_theta, track_label = detect_track_theta(selected_race_details)
     
-    st.success(f"⚙️ **Behind-the-Scenes Calibration:** Detected `{selected_race_details}` $\\rightarrow$ Applied **{track_label}** (Henery $\\theta = {active_theta}$)")
+    # Tier Classification Engine
+    tier_num, tier_title, tier_max_stake_pct, ev_multiplier, badge_color = classify_race_tier(selected_race_details, data_df)
+    suggested_tier_stake_cap = float(bankroll * tier_max_stake_pct)
 
-    # Compute underlying Henery Quinella probabilities with active_theta
+    # Status Banners
+    st.markdown(f"### {tier_title}")
+    
+    col_stat1, col_stat2, col_stat3 = st.columns(3)
+    col_stat1.metric("Track Calibration", f"\\theta = {active_theta}", help=track_label)
+    col_stat2.metric("Suggested Stake Cap", f"${suggested_tier_stake_cap:.2f} ({tier_max_stake_pct*100:.1f}%)")
+    col_stat3.metric("Required EV Price Floor", f"+{(ev_multiplier - 1.0)*100:.0f}% EV")
+
+    if tier_num == 4:
+        st.error("⚠️ **HIGH NOISE WARNING:** Class 5 / Griffin races carry high statistical variance. Passing this race is strongly recommended to preserve capital.")
+
+    # Compute Henery Quinella probabilities
     full_q_probs = compute_henery_quinella(data_df, theta=active_theta)
     
     df_calc = data_df.copy()
     df_calc['Win Prob (Dec)'] = df_calc['Model Win %'] / 100.0
     df_calc['Win Fair Odds'] = df_calc['Win Prob (Dec)'].apply(lambda p: round(1.0 / p, 2) if p > 0 else 999.0)
-    df_calc['Win Min Odds (+5% EV)'] = df_calc['Win Prob (Dec)'].apply(lambda p: round(1.05 / p, 2) if p > 0 else 999.0)
+    
+    # Apply Tier-Specific EV Multiplier
+    df_calc['Win Min Odds (EV Floor)'] = df_calc['Win Prob (Dec)'].apply(
+        lambda p: round(ev_multiplier / p, 2) if p > 0 else 999.0
+    )
 
     st.subheader("Price Floor & Trainer Audit Table")
     
@@ -239,11 +310,9 @@ if data_df is not None and not data_df.empty:
             help="Highlights the horses with the highest Model Win % in bright yellow."
         )
 
-    # Determine cutoff value for Top N Win %
     top_n_cutoffs = df_calc['Model Win %'].nlargest(top_n_val).tolist()
     cutoff_val = top_n_cutoffs[-1] if top_n_cutoffs else 0.0
 
-    # Custom row styling function (yellow background for Top N)
     def highlight_top_n(row):
         if row['Model Win %'] >= cutoff_val and row['Model Win %'] > 0:
             return ['background-color: #FFFF99; color: #000000; font-weight: bold;'] * len(row)
@@ -252,12 +321,12 @@ if data_df is not None and not data_df.empty:
     if 'Keep' not in df_calc.columns:
         df_calc.insert(0, 'Keep', True)
 
-    display_df = df_calc[['Keep', 'Horse No', 'Horse Name', 'Model Win %', 'Win Fair Odds', 'Win Min Odds (+5% EV)']]
+    display_df = df_calc[['Keep', 'Horse No', 'Horse Name', 'Model Win %', 'Win Fair Odds', 'Win Min Odds (EV Floor)']]
     styled_df = display_df.style.apply(highlight_top_n, axis=1)
 
     edited_df = st.data_editor(
         styled_df,
-        disabled=['Horse No', 'Horse Name', 'Model Win %', 'Win Fair Odds', 'Win Min Odds (+5% EV)'],
+        disabled=['Horse No', 'Horse Name', 'Model Win %', 'Win Fair Odds', 'Win Min Odds (EV Floor)'],
         hide_index=True,
         use_container_width=True
     )
@@ -289,13 +358,13 @@ if data_df is not None and not data_df.empty:
                     'Horse No': int(row['Horse No']),
                     'Horse Name': row['Horse Name'],
                     'Model Win %': row['Model Win %'],
-                    'Min Odds (+5% EV)': row['Win Min Odds (+5% EV)']
+                    'Min Odds (EV Floor)': row['Win Min Odds (EV Floor)']
                 })
             win_sel_df = pd.DataFrame(win_selection_data)
             
             edited_win_sel = st.data_editor(
                 win_sel_df,
-                disabled=['Horse No', 'Horse Name', 'Model Win %', 'Min Odds (+5% EV)'],
+                disabled=['Horse No', 'Horse Name', 'Model Win %', 'Min Odds (EV Floor)'],
                 hide_index=True,
                 key="win_bet_selector",
                 use_container_width=True
@@ -307,7 +376,7 @@ if data_df is not None and not data_df.empty:
                     'Bet Type': 'Win',
                     'Label': f"#{row['Horse No']} {row['Horse Name']}",
                     'Model %': row['Model Win %'],
-                    'Min Odds (+5% EV)': row['Min Odds (+5% EV)']
+                    'Min Odds (EV Floor)': row['Min Odds (EV Floor)']
                 })
 
         # --- Sub-Section B: Henery Quinella Combinations ---
@@ -325,21 +394,21 @@ if data_df is not None and not data_df.empty:
                     prob_q = full_q_probs.get(q_key, 0.0)
                     
                     fair_q_odds = round(1.0 / prob_q, 2) if prob_q > 0 else 999.0
-                    min_q_odds = round(1.05 / prob_q, 2) if prob_q > 0 else 999.0
+                    min_q_odds = round(ev_multiplier / prob_q, 2) if prob_q > 0 else 999.0
                     
                     q_selection_data.append({
                         'Select': False,
                         'Combo': f"Q {q_key}",
                         'Henery Q %': round(prob_q * 100.0, 2),
                         'Fair Odds': fair_q_odds,
-                        'Min Odds (+5% EV)': min_q_odds
+                        'Min Odds (EV Floor)': min_q_odds
                     })
                 
                 q_sel_df = pd.DataFrame(q_selection_data)
                 
                 edited_q_sel = st.data_editor(
                     q_sel_df,
-                    disabled=['Combo', 'Henery Q %', 'Fair Odds', 'Min Odds (+5% EV)'],
+                    disabled=['Combo', 'Henery Q %', 'Fair Odds', 'Min Odds (EV Floor)'],
                     hide_index=True,
                     key="q_bet_selector",
                     use_container_width=True
@@ -351,7 +420,7 @@ if data_df is not None and not data_df.empty:
                         'Bet Type': 'Quinella',
                         'Label': row['Combo'],
                         'Model %': row['Henery Q %'],
-                        'Min Odds (+5% EV)': row['Min Odds (+5% EV)']
+                        'Min Odds (EV Floor)': row['Min Odds (EV Floor)']
                     })
 
         active_portfolio = selected_win_bets + selected_q_bets
@@ -374,7 +443,7 @@ if data_df is not None and not data_df.empty:
                 for idx, bet in enumerate(active_portfolio):
                     col = cols[idx % 4]
                     bet_code = bet['Bet Code']
-                    min_odds = float(bet['Min Odds (+5% EV)'])
+                    min_odds = float(bet['Min Odds (EV Floor)'])
                     
                     live_odds_inputs[bet_code] = col.number_input(
                         f"{bet_code} (Min: {min_odds})",
@@ -385,12 +454,12 @@ if data_df is not None and not data_df.empty:
                     )
 
                 custom_stake = st.number_input(
-                    f"Target Total Race Stake ($) — Max Allowed: ${max_race_stake:.2f}",
+                    f"Target Total Race Stake ($) — Tier Suggested Cap: ${suggested_tier_stake_cap:.2f}",
                     min_value=10.0,
-                    max_value=max_race_stake,
-                    value=max_race_stake,
+                    max_value=float(suggested_tier_stake_cap),
+                    value=float(suggested_tier_stake_cap),
                     step=10.0,
-                    help=f"Defaults to 5% bankroll ceiling (${max_race_stake:.2f}). You can manually reduce this stake amount."
+                    help=f"Auto-scaled to {tier_title} max stake cap (${suggested_tier_stake_cap:.2f})."
                 )
 
                 calculate_btn = st.form_submit_button("Calculate Portfolio Dutching")
@@ -402,7 +471,7 @@ if data_df is not None and not data_df.empty:
                 for bet in active_portfolio:
                     code = bet['Bet Code']
                     curr_odds = live_odds_inputs[code]
-                    min_odds = bet['Min Odds (+5% EV)']
+                    min_odds = bet['Min Odds (EV Floor)']
                     
                     inv_odds = 1.0 / curr_odds
                     inv_odds_sum += inv_odds
@@ -411,7 +480,7 @@ if data_df is not None and not data_df.empty:
                         'Bet Code': code,
                         'Type': bet['Bet Type'],
                         'Model %': bet['Model %'],
-                        'Min Odds (+5% EV)': min_odds,
+                        'Min Odds (EV Floor)': min_odds,
                         'Live Odds': curr_odds,
                         'Value Check': "✅ Value" if curr_odds >= min_odds else "❌ Overvalued",
                         'Inv Odds': inv_odds
@@ -430,7 +499,7 @@ if data_df is not None and not data_df.empty:
                 actual_total_stake = int(dutch_df['Suggested Stake ($)'].sum())
                 dutch_df['Est Payout ($)'] = (dutch_df['Suggested Stake ($)'] * dutch_df['Live Odds']).round(1)
                 
-                # --- Multi-Pool Scenario Evaluation (Min Floor vs Max Stacked Profit) ---
+                # Multi-Pool Scenario Evaluation
                 all_horses_in_race = sorted(data_df['Horse No'].tolist())
                 stake_lookup = dict(zip(dutch_df['Bet Code'], dutch_df['Suggested Stake ($)']))
                 odds_lookup = dict(zip(dutch_df['Bet Code'], dutch_df['Live Odds']))
@@ -475,10 +544,10 @@ if data_df is not None and not data_df.empty:
                 m5.metric("Dutch Book Overround", f"{(inv_odds_sum * 100.0):.1f}%")
 
                 st.dataframe(
-                    dutch_df[['Bet Code', 'Type', 'Live Odds', 'Min Odds (+5% EV)', 'Value Check', 'Bet Ratio (%)', 'Suggested Stake ($)', 'Est Payout ($)']],
+                    dutch_df[['Bet Code', 'Type', 'Live Odds', 'Min Odds (EV Floor)', 'Value Check', 'Bet Ratio (%)', 'Suggested Stake ($)', 'Est Payout ($)']],
                     hide_index=True,
                     use_container_width=True
                 )
 
-                if any(dutch_df['Live Odds'] < dutch_df['Min Odds (+5% EV)']):
-                    st.warning("⚠️ One or more selected bets are below your Minimum Acceptable Odds (+5% EV). Consider unchecking overvalued legs in Section 2.")
+                if any(dutch_df['Live Odds'] < dutch_df['Min Odds (EV Floor)']):
+                    st.warning("⚠️ One or more selected bets are below your Minimum Acceptable Odds (EV Floor). Consider unchecking overvalued legs in Section 2.")
