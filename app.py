@@ -32,26 +32,12 @@ def detect_track_theta(race_info_text: str):
 def classify_race_tier(race_details_text: str, df: pd.DataFrame):
     """
     Classifies race into Tiers 1-4 based on Class, Probability Concentration,
-    and Dominance Gap between runners.
+    and Dominance Gap between runners, with Class 5 Standout Override.
     Returns: (tier_num, tier_title, recommended_max_stake_pct, ev_multiplier, badge_color)
     """
     text_upper = race_details_text.upper()
     
-    # Check for Tier 4: Class 5, Griffin, Maiden
-    is_class_5_or_griffin = any(k in text_upper for k in [
-        'C5', 'CLASS 5', 'CLASS5', 'GRIFFIN', 'MAIDEN', 'RATING 40-0', 'RESTRICTED'
-    ])
-    
-    if is_class_5_or_griffin:
-        return (
-            4, 
-            "🚨 Tier 4: Class 5 / Griffin (High Noise — Recommended AUTO-PASS)", 
-            0.015,  # 1.5% max stake cap
-            1.15,   # +15% EV floor required
-            "red"
-        )
-    
-    # Extract top 4 win percentages for gap analysis
+    # Extract top win percentages for gap analysis
     top_win_pcts = df['Model Win %'].nlargest(4).tolist()
     p1 = top_win_pcts[0] if len(top_win_pcts) > 0 else 0.0
     p2 = top_win_pcts[1] if len(top_win_pcts) > 1 else 0.0
@@ -64,9 +50,40 @@ def classify_race_tier(race_details_text: str, df: pd.DataFrame):
     gap_2_3 = p2 - p3
     gap_3_4 = p3 - p4
 
+    # Check for Class 5 / Griffin / Maiden
+    is_class_5_or_griffin = any(k in text_upper for k in [
+        'C5', 'CLASS 5', 'CLASS5', 'GRIFFIN', 'MAIDEN', 'RATING 40-0', 'RESTRICTED'
+    ])
+    
+    # Class 5 Standout Overrides
+    if is_class_5_or_griffin:
+        if p1 >= 50.0:
+            return (
+                1, 
+                "🥇 Tier 1: Class 5 Standout (Top Pick ≥ 50% — High Confidence)", 
+                0.05,   # 5.0% max stake cap
+                1.05,   # +5% EV floor
+                "green"
+            )
+        elif top_2_sum >= 55.0:
+            return (
+                2, 
+                "🥈 Tier 2: Class 5 Dominant Pair (Top 2 ≥ 55% — Moderate Confidence)", 
+                0.04,   # 4.0% max stake cap
+                1.05,   # +5% EV floor
+                "blue"
+            )
+        else:
+            return (
+                4, 
+                "🚨 Tier 4: Class 5 / Griffin (High Noise — Recommended AUTO-PASS)", 
+                0.015,  # 1.5% max stake cap
+                1.15,   # +15% EV floor required
+                "red"
+            )
+
+    # Standard Class 4 or Above Tier Logic
     # Tier 1: Dominant 2-Horse Core
-    # Primary: Top 2 >= 45% OR Top 1 >= 28%
-    # Gap Rule: Top 2 >= 42% AND Gap(2->3) >= 7%
     if (top_2_sum >= 45.0) or (p1 >= 28.0) or (top_2_sum >= 42.0 and gap_2_3 >= 7.0):
         return (
             1, 
@@ -75,10 +92,7 @@ def classify_race_tier(race_details_text: str, df: pd.DataFrame):
             1.05,   # +5% EV floor
             "green"
         )
-    
     # Tier 2: Solid 3-Horse Core
-    # Primary: Top 3 >= 48%
-    # Gap Rule: Top 3 >= 44% AND Gap(3->4) >= 5%
     elif (top_3_sum >= 48.0) or (top_3_sum >= 44.0 and gap_3_4 >= 5.0):
         return (
             2, 
@@ -87,8 +101,7 @@ def classify_race_tier(race_details_text: str, df: pd.DataFrame):
             1.05,   # +5% EV floor
             "blue"
         )
-    
-    # Tier 3: Wide-Open / Fragmented (Top 3 < 44% or no clear gap)
+    # Tier 3: Wide-Open / Fragmented
     else:
         return (
             3, 
@@ -203,6 +216,7 @@ st.sidebar.markdown("""
 ---
 **Active Engine Rules:**
 * 🏷️ **Tier Classification:** Gap-Adjusted Tiers 1–4 Engine.
+* ⚡ **Class 5 Override:** Active (P1 ≥ 50% → Tier 1 Override).
 * 🧠 **Quinella Engine:** Henery Power Discount (Auto-Track $\\theta$).
 * 🛡️ **Dynamic Stake Cap:** Scaled by Tier Confidence (1.5% to 5.0%).
 * 💵 **HKJC Unit Rule:** Stakes rounded to nearest HK$10.
